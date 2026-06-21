@@ -21,8 +21,8 @@ window.SAKU_CONFIG = {
      Buat repo PRIVAT khusus data (mis. "saku-data"), lalu isi:
   ---------------------------------------------------------- */
   sync: {
-    owner:  "",            // username GitHub Anda, mis. "bbkukuh"
-    repo:   "",            // repo PRIVAT untuk data, mis. "saku-data"
+    owner:  "kukuh-haryobismoko",            // username GitHub Anda, mis. "bbkukuh"
+    repo:   "saku-data",            // repo PRIVAT untuk data, mis. "saku-data"
     path:   "vault.json",  // nama file penyimpan data terenkripsi
     branch: "main"
   }
