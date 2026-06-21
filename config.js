@@ -9,7 +9,7 @@ window.SAKU_CONFIG = {
   resetEmail: "bbkukuh@gmail.com",
 
   // Access key dari https://web3forms.com (gratis).
-  web3formsKey: "",
+  web3formsKey: "fe539c0a-6597-4180-bb4f-c54bd3a0b271",
 
   /* ----------------------------------------------------------
      SINKRONISASI CLOUD (opsional) — agar data bisa dibuka di
