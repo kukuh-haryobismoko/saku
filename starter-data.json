@@ -1,0 +1,257 @@
+{
+  "accounts": [
+    {
+      "id": "a1",
+      "name": "Rekening BCA",
+      "type": "Rekening",
+      "base": 0,
+      "color": "#0A5DAE",
+      "mono": "BCA"
+    },
+    {
+      "id": "a2",
+      "name": "Rekening Mandiri",
+      "type": "Rekening",
+      "base": 0,
+      "color": "#003D79",
+      "mono": "MDR"
+    },
+    {
+      "id": "a3",
+      "name": "Dompet Tunai",
+      "type": "Rekening",
+      "base": 0,
+      "color": "#1E7E34",
+      "mono": "TUN"
+    },
+    {
+      "id": "a4",
+      "name": "Rekening Krom",
+      "type": "Rekening",
+      "base": 19480026,
+      "color": "#5B3FD6",
+      "mono": "KRM"
+    },
+    {
+      "id": "a5",
+      "name": "Rekening Seabank",
+      "type": "Rekening",
+      "base": 0,
+      "color": "#00A19A",
+      "mono": "SEA"
+    },
+    {
+      "id": "a6",
+      "name": "Reksa Dana Bibit",
+      "type": "Investasi",
+      "base": 0,
+      "color": "#1BA876",
+      "mono": "BBT"
+    },
+    {
+      "id": "a7",
+      "name": "Saham / RDN",
+      "type": "Investasi",
+      "base": 0,
+      "color": "#B7791F",
+      "mono": "SHM"
+    },
+    {
+      "id": "a8",
+      "name": "Kartu Kredit BCA",
+      "type": "Kartu Kredit",
+      "base": 9000000,
+      "color": "#0A5DAE",
+      "mono": "BCA"
+    },
+    {
+      "id": "a9",
+      "name": "Kartu Kredit BRI",
+      "type": "Kartu Kredit",
+      "base": 25000000,
+      "color": "#00529C",
+      "mono": "BRI"
+    },
+    {
+      "id": "a10",
+      "name": "Kartu Kredit CIMB",
+      "type": "Kartu Kredit",
+      "base": 3000000,
+      "color": "#7A1F2B",
+      "mono": "CMB"
+    },
+    {
+      "id": "a11",
+      "name": "Shopee Paylater",
+      "type": "Paylater",
+      "base": 25500000,
+      "color": "#EE4D2D",
+      "mono": "SPL"
+    }
+  ],
+  "txns": [
+    {
+      "id": "tf4y26eiocq",
+      "kind": "expense",
+      "date": "2026-06-18",
+      "desc": "Saldo awal utang BRI",
+      "cat": "Lainnya",
+      "acc": "a9",
+      "amt": 64000
+    },
+    {
+      "id": "tb8bf3v7ocq",
+      "kind": "expense",
+      "date": "2026-06-18",
+      "desc": "Saldo awal utang CIMB",
+      "cat": "Lainnya",
+      "acc": "a10",
+      "amt": 600000
+    },
+    {
+      "id": "trjwnh9iocq",
+      "kind": "expense",
+      "date": "2026-06-18",
+      "desc": "Saldo awal Shopee Paylater",
+      "cat": "Lainnya",
+      "acc": "a11",
+      "amt": 1048594
+    },
+    {
+      "id": "t21fk8n9ocq",
+      "kind": "expense",
+      "date": "2026-06-18",
+      "desc": "Makan baraburger",
+      "cat": "Makanan & Minuman",
+      "acc": "a4",
+      "amt": 56500
+    },
+    {
+      "id": "tpi1h7xxocq",
+      "kind": "expense",
+      "date": "2026-06-18",
+      "desc": "Grab kantor",
+      "cat": "Transportasi",
+      "acc": "a9",
+      "amt": 9000
+    },
+    {
+      "id": "ty8jyx0eocq",
+      "kind": "expense",
+      "date": "2026-06-18",
+      "desc": "Belanja CIMB",
+      "cat": "Lainnya",
+      "acc": "a10",
+      "amt": 600000
+    },
+    {
+      "id": "t1xwefmoocq",
+      "kind": "expense",
+      "date": "2026-06-19",
+      "desc": "Makan baraburger",
+      "cat": "Makanan & Minuman",
+      "acc": "a9",
+      "amt": 58500
+    },
+    {
+      "id": "txdi7w2wocq",
+      "kind": "expense",
+      "date": "2026-06-20",
+      "desc": "Shopee deals",
+      "cat": "Makanan & Minuman",
+      "acc": "a4",
+      "amt": 23000
+    },
+    {
+      "id": "tb6sripaocq",
+      "kind": "expense",
+      "date": "2026-06-20",
+      "desc": "ShopeeFood",
+      "cat": "Makanan & Minuman",
+      "acc": "a11",
+      "amt": 14500
+    },
+    {
+      "id": "txyggrkuocq",
+      "kind": "expense",
+      "date": "2026-06-20",
+      "desc": "Grabbike ke bakso",
+      "cat": "Transportasi",
+      "acc": "a9",
+      "amt": 20500
+    },
+    {
+      "id": "txkiszsiocq",
+      "kind": "expense",
+      "date": "2026-06-20",
+      "desc": "Bakso Samrat",
+      "cat": "Makanan & Minuman",
+      "acc": "a8",
+      "amt": 220000
+    },
+    {
+      "id": "t8fzqkzaocq",
+      "kind": "expense",
+      "date": "2026-06-20",
+      "desc": "Terea",
+      "cat": "Belanja",
+      "acc": "a4",
+      "amt": 36000
+    },
+    {
+      "id": "twonv09mocq",
+      "kind": "expense",
+      "date": "2026-06-20",
+      "desc": "Grab ke barber",
+      "cat": "Transportasi",
+      "acc": "a9",
+      "amt": 20500
+    },
+    {
+      "id": "t2acdpu3ocq",
+      "kind": "expense",
+      "date": "2026-06-20",
+      "desc": "Potong rambut",
+      "cat": "Lainnya",
+      "acc": "a4",
+      "amt": 65000
+    },
+    {
+      "id": "tqp32wfcocq",
+      "kind": "expense",
+      "date": "2026-06-20",
+      "desc": "Transfer ke Tasya",
+      "cat": "Makanan & Minuman",
+      "acc": "a4",
+      "amt": 50000
+    },
+    {
+      "id": "tdhcj8ihocq",
+      "kind": "expense",
+      "date": "2026-06-20",
+      "desc": "Grab pulang",
+      "cat": "Transportasi",
+      "acc": "a9",
+      "amt": 7000
+    },
+    {
+      "id": "tkyj7m6oocq",
+      "kind": "expense",
+      "date": "2026-06-21",
+      "desc": "GrabFood baraburger",
+      "cat": "Makanan & Minuman",
+      "acc": "a4",
+      "amt": 56000
+    },
+    {
+      "id": "txv8dmrmocq",
+      "kind": "income",
+      "date": "2026-06-18",
+      "desc": "Transfer masuk CIMB",
+      "jenis": "Transfer Masuk",
+      "acc": "a4",
+      "amt": 600000
+    }
+  ],
+  "adjust": -17000000
+}

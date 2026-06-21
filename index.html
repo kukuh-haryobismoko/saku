@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1B3A4B">
+<title>Saku — Catatan Keuangan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<!-- ============ LOCK SCREEN ============ -->
+<div class="lock" id="lockScreen">
+  <div class="lock-card">
+    <div class="lock-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v12H3z"/><path d="M3 7l3-4h12l3 4"/><circle cx="12" cy="13" r="2.5"/></svg></div>
+    <h1 id="lockTitle">Buka Saku</h1>
+    <p id="lockDesc">Masukkan kata sandi untuk membuka catatan keuangan Anda.</p>
+    <input type="password" id="lockPass" placeholder="Kata sandi" autocomplete="current-password">
+    <input type="password" id="lockPass2" class="hidden" placeholder="Ulangi kata sandi" autocomplete="new-password">
+    <div class="lock-err" id="lockErr"></div>
+    <button class="lock-btn" id="lockBtn">Buka</button>
+    <div class="lock-note" id="lockNote">Data Anda dienkripsi dengan kata sandi ini di perangkat ini.</div>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<div id="app" class="hidden">
+  <div class="top">
+    <div class="top-in">
+      <div class="brand">
+        <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v12H3z"/><path d="M3 7l3-4h12l3 4"/><circle cx="12" cy="13" r="2.5"/></svg></div>
+        <div><div class="name">Saku</div><div class="sub" id="todayLabel"></div></div>
+      </div>
+      <div class="spacer"></div>
+      <button class="icon-btn" id="btnLock" title="Kunci">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg></button>
+      <button class="icon-btn" id="btnSettings" title="Pengaturan">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
+      <button class="btn btn-primary header-cta" id="btnAdd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Catat Transaksi</button>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="hero">
+      <div class="hero-label">Kekayaan Bersih</div>
+      <div class="hero-nw num" id="netWorth">Rp0</div>
+      <div class="hero-meta" id="heroMeta"></div>
+      <div class="comp"><div class="comp-track" id="compTrack"></div><div class="comp-legend" id="compLegend"></div></div>
+    </div>
+
+    <div class="kpis" id="kpis"></div>
+
+    <div class="grid-2 sec">
+      <div>
+        <div class="sec-head"><h2>Sumber Dana</h2><span class="count" id="accCount"></span></div>
+        <div class="acc-grid" id="accGrid"></div>
+      </div>
+      <div>
+        <div class="sec-head"><h2>Bulan Ini</h2></div>
+        <div class="panel">
+          <h3>Pengeluaran per Kategori</h3>
+          <div class="ph-sub" id="catSub"></div>
+          <div id="catList"></div>
+          <div class="flow">
+            <div><div class="f-lab">Masuk</div><div class="f-val num" id="flowIn" style="color:var(--green)">Rp0</div></div>
+            <div><div class="f-lab">Keluar</div><div class="f-val num" id="flowOut" style="color:var(--red)">Rp0</div></div>
+            <div><div class="f-lab">Selisih</div><div class="f-val num" id="flowNet">Rp0</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-head"><h2>Transaksi</h2><span class="count" id="txCount"></span></div>
+      <div class="tx-controls" id="txFilters"></div>
+      <div class="tx-list" id="txList"></div>
+    </div>
+  </div>
+
+  <button class="fab" id="fab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Catat</button>
+</div>
+
+<div class="scrim" id="scrim"><div class="sheet" id="sheet"></div></div>
+<div class="toast" id="toast"></div>
+
+<script src="config.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
