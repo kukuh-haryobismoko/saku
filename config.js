@@ -12,5 +12,5 @@ window.SAKU_CONFIG = {
   // Daftarkan email di atas, salin access key, tempel di sini.
   // Biarkan kosong ("") jika belum diatur — fitur reset akan
   // memberi tahu cara mengaktifkannya.
-  web3formsKey: ""
+  web3formsKey: "fe539c0a-6597-4180-bb4f-c54bd3a0b271"
 };
