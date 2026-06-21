@@ -55,7 +55,46 @@ boleh ikut di‑commit.
 
 ---
 
-## 3. Masukkan Data Awal (opsional)
+## 3. Sinkronisasi Antar Perangkat (GitHub) — buka di mana saja
+
+> **Penting:** GitHub Pages hanya *menyajikan* file, ia **tidak menyimpan** data Anda.
+> Data transaksi tersimpan di `localStorage` tiap browser, jadi tanpa langkah ini data
+> **tidak** ikut pindah saat Anda buka di perangkat lain. Fitur ini menyimpan salinan
+> data (yang **sudah terenkripsi**) ke sebuah repo GitHub **privat** sebagai gudang data.
+
+**Cara kerja & keamanan:** yang diunggah ke GitHub hanyalah *ciphertext* AES‑256. Tanpa
+kata sandi Anda, isinya tak terbaca siapa pun — termasuk bila repo bocor. Token GitHub
+**tidak** di‑commit; ia hanya disimpan di perangkat masing‑masing.
+
+### Langkah sekali atur
+
+1. **Buat repo privat khusus data**, mis. `saku-data` (centang **Private**). Repo ini
+   terpisah dari repo kode/website. Boleh kosong.
+2. **Buat fine‑grained token:** GitHub → *Settings → Developer settings → Fine‑grained
+   tokens → Generate new token*.
+   - *Repository access* → **Only select repositories** → pilih `saku-data`.
+   - *Permissions → Repository → Contents* → **Read and write**.
+   - Salin tokennya (`github_pat_...`). Token ini hanya bisa menyentuh repo data itu.
+3. **(Opsional) isi default di `config.js`** agar tak perlu mengetik tiap perangkat —
+   isi `owner` & `repo` (lihat blok `sync`). **Jangan** taruh token di sini.
+4. **Di aplikasi:** ⚙ → **Sinkronisasi Cloud (GitHub)** → isi owner, repo, nama file
+   (`vault.json`), branch (`main`), dan **tempel token** → **Simpan & Uji**.
+   Data lokal Anda langsung terunggah.
+
+### Membuka di perangkat lain (HP, laptop kantor, dll)
+
+1. Buka URL situs Anda di perangkat itu.
+2. Di layar kunci, klik **“☁ Sudah punya data di GitHub? Sambungkan perangkat ini”**.
+3. Isi owner/repo/token **dan kata sandi yang sama** → **Tarik & Buka**. Selesai.
+
+Setelah tersambung, tiap perubahan otomatis terunggah, dan saat membuka aplikasi data
+terbaru otomatis ditarik. Titik kecil di kanan atas menunjukkan status sinkron
+(hijau = aman, oranye = sedang/ gagal). Bila dua perangkat mengubah bersamaan, yang
+**tersimpan paling akhir** menang — jadi selesaikan edit di satu perangkat dulu.
+
+---
+
+## 4. Masukkan Data Awal (opsional)
 
 Agar repo publik tidak memuat saldo pribadi, aplikasi mulai dari **template kosong**
 (saldo 0). Untuk memuat data contoh Anda:
@@ -68,7 +107,7 @@ Simpan baik‑baik sebagai cadangan.
 
 ---
 
-## 4. Keamanan — yang perlu dipahami
+## 5. Keamanan — yang perlu dipahami
 
 - Kata sandi Anda menurunkan kunci AES‑256 (PBKDF2, 200rb iterasi). Seluruh data
   disimpan sebagai **ciphertext** di `localStorage`. Tanpa kata sandi, isinya tak terbaca.
@@ -76,11 +115,12 @@ Simpan baik‑baik sebagai cadangan.
 - Ini aplikasi sisi‑klien: keamanannya melindungi **data tersimpan**, bukan mencegah
   seseorang yang memegang perangkat tak‑terkunci. Untuk keamanan maksimal, host di
   repo **privat** dan kunci perangkat Anda.
-- Data tersimpan **per browser/perangkat**. Pindah perangkat → pakai Unduh/Impor cadangan.
+- Data tersimpan **per browser/perangkat**. Untuk membuka di banyak perangkat, aktifkan
+  **Sinkronisasi GitHub** (Bagian 3); atau pindah manual via **Unduh/Impor cadangan**.
 
 ---
 
-## 5. Struktur Berkas
+## 6. Struktur Berkas
 
 ```
 saku/

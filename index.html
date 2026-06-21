@@ -23,6 +23,7 @@
     <div class="lock-err" id="lockErr"></div>
     <button class="lock-btn" id="lockBtn">Buka</button>
     <div class="lock-note" id="lockNote">Data Anda dienkripsi dengan kata sandi ini di perangkat ini.</div>
+    <button id="lockCloud" class="lock-link hidden" type="button">☁ Sudah punya data di GitHub? Sambungkan perangkat ini</button>
   </div>
 </div>
 
@@ -35,6 +36,7 @@
         <div><div class="name">Saku</div><div class="sub" id="todayLabel"></div></div>
       </div>
       <div class="spacer"></div>
+      <span id="syncDot" class="sync-dot" title=""></span>
       <button class="icon-btn" id="btnLock" title="Kunci">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg></button>
       <button class="icon-btn" id="btnSettings" title="Pengaturan">

@@ -4,6 +4,12 @@
    =========================================================== */
 const CONFIG = window.SAKU_CONFIG || { resetEmail:"", web3formsKey:"" };
 const VAULT_KEY = "saku.vault.v1";
+const SYNC_KEY  = "saku.sync.v1";              // konfigurasi sinkronisasi (lokal, tidak di-commit)
+const SYNCDEF   = (CONFIG.sync) || {};          // default non-rahasia dari config.js (owner/repo/path)
+let   PASSWORD  = null;                          // disimpan di memori sesi utk derive key vault remote
+let   SYNC      = null;                          // {owner,repo,path,branch,token}
+let   REMOTE_SHA= null;                          // sha file terakhir di GitHub (utk update aman)
+let   syncBusy  = false, syncDirty = false;      // pengatur antrian push
 
 /* ---------------- crypto (AES-GCM + PBKDF2) ---------------- */
 const enc = new TextEncoder(), dec = new TextDecoder();
@@ -30,11 +36,14 @@ let CRYPTOKEY = null, SALT = null;
 function readVault(){ try{ return JSON.parse(localStorage.getItem(VAULT_KEY)); }catch(e){ return null; } }
 async function writeVault(){
   const blob = await encryptObj(CRYPTOKEY, S);
-  localStorage.setItem(VAULT_KEY, JSON.stringify({ v:1, salt:b64(SALT), iter:200000, blob }));
+  const wrap = { v:1, salt:b64(SALT), iter:200000, updatedAt:Date.now(), blob };
+  localStorage.setItem(VAULT_KEY, JSON.stringify(wrap));
+  return wrap;
 }
 async function createVault(password){
   SALT = crypto.getRandomValues(new Uint8Array(16));
   CRYPTOKEY = await deriveKey(password, SALT);
+  PASSWORD = password;
   S = seed();
   await writeVault();
 }
@@ -44,12 +53,113 @@ async function unlockVault(password){
   const key = await deriveKey(password, SALT);
   S = await decryptObj(key, v.blob);   // throws if wrong password
   CRYPTOKEY = key;
+  PASSWORD = password;
 }
 async function changePassword(newPass){
   SALT = crypto.getRandomValues(new Uint8Array(16));
   CRYPTOKEY = await deriveKey(newPass, SALT);
+  PASSWORD = newPass;
   await writeVault();
+  cloudPush();
 }
+
+/* ============================================================
+   SINKRONISASI CLOUD via GitHub Contents API
+   ------------------------------------------------------------
+   Menyimpan file vault (SUDAH terenkripsi AES-256) ke repo
+   GitHub PRIVAT. Token tidak pernah di-commit; ditempel
+   per-perangkat & disimpan di localStorage. Yang terkirim ke
+   GitHub hanya ciphertext — tanpa kata sandi, tak terbaca.
+   ============================================================ */
+function loadSync(){
+  try{ const s=JSON.parse(localStorage.getItem(SYNC_KEY)); if(s&&s.token){ SYNC=s; return s; } }catch(e){}
+  if(SYNCDEF.owner&&SYNCDEF.repo){ SYNC={owner:SYNCDEF.owner,repo:SYNCDEF.repo,path:SYNCDEF.path||"vault.json",branch:SYNCDEF.branch||"main",token:""}; }
+  return SYNC;
+}
+function saveSync(cfg){ SYNC=cfg; localStorage.setItem(SYNC_KEY, JSON.stringify(cfg)); }
+function clearSync(){ SYNC=null; REMOTE_SHA=null; localStorage.removeItem(SYNC_KEY); loadSync(); }
+function syncReady(){ return !!(SYNC&&SYNC.owner&&SYNC.repo&&SYNC.path&&SYNC.token); }
+
+function ghHeaders(){ return { "Authorization":"Bearer "+SYNC.token, "Accept":"application/vnd.github+json", "X-GitHub-Api-Version":"2022-11-28" }; }
+function ghUrl(){ return `https://api.github.com/repos/${SYNC.owner}/${SYNC.repo}/contents/${SYNC.path.split("/").map(encodeURIComponent).join("/")}`; }
+const utf8b64  = s => btoa(unescape(encodeURIComponent(s)));
+const b64utf8  = s => decodeURIComponent(escape(atob(s.replace(/\n/g,""))));
+
+async function ghGet(){
+  const r = await fetch(ghUrl()+`?ref=${encodeURIComponent(SYNC.branch||"main")}`, {headers:ghHeaders()});
+  if(r.status===404){ REMOTE_SHA=null; return {wrap:null,sha:null}; }
+  if(r.status===401||r.status===403) throw new Error("AUTH");
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  const j = await r.json(); REMOTE_SHA=j.sha;
+  return { wrap: JSON.parse(b64utf8(j.content)), sha:j.sha };
+}
+async function ghPut(wrap){
+  const body = { message:"saku sync "+new Date().toISOString(),
+                 content: utf8b64(JSON.stringify(wrap)), branch: SYNC.branch||"main" };
+  if(REMOTE_SHA) body.sha=REMOTE_SHA;
+  let r = await fetch(ghUrl(), {method:"PUT", headers:{...ghHeaders(),"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  if(r.status===409||r.status===422){           // sha basi → ambil sha terbaru lalu coba lagi
+    await ghGet(); body.sha=REMOTE_SHA;
+    r = await fetch(ghUrl(), {method:"PUT", headers:{...ghHeaders(),"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  }
+  if(r.status===401||r.status===403) throw new Error("AUTH");
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  const j = await r.json(); REMOTE_SHA = j.content && j.content.sha;
+}
+
+// Unggah vault lokal ke GitHub (antri bila sedang sibuk)
+function cloudPush(){
+  if(!syncReady()) return;
+  if(syncBusy){ syncDirty=true; return; }
+  syncBusy=true; setSyncDot("sync");
+  const wrap = readVault();
+  ghPut(wrap)
+    .then(()=>{ setSyncDot("ok"); })
+    .catch(e=>{ setSyncDot("err"); if(e.message==="AUTH") toast("Token GitHub ditolak — perbarui di Pengaturan",true); else toast("Gagal sinkron ke GitHub",true); })
+    .finally(()=>{ syncBusy=false; if(syncDirty){ syncDirty=false; cloudPush(); } });
+}
+
+// Tarik vault dari GitHub. adopt=true → pakai bila remote lebih baru (untuk perangkat lain).
+async function cloudPull(adopt){
+  if(!syncReady()) return {status:"off"};
+  const {wrap} = await ghGet();
+  if(!wrap) return {status:"empty"};
+  const local = readVault();
+  const remoteNewer = !local || (wrap.updatedAt||0) > (local.updatedAt||0);
+  if(adopt && remoteNewer){
+    if(PASSWORD==null) throw new Error("LOCKED");
+    const salt = unb64(wrap.salt);
+    const key  = await deriveKey(PASSWORD, salt);
+    const data = await decryptObj(key, wrap.blob);   // throws bila kata sandi beda
+    S=data; SALT=salt; CRYPTOKEY=key;
+    localStorage.setItem(VAULT_KEY, JSON.stringify(wrap));
+    return {status:"pulled"};
+  }
+  return {status: remoteNewer?"remote-newer":"up-to-date"};
+}
+
+// Auto-pull saat masuk app
+async function cloudAutoPull(){
+  if(!syncReady()) return;
+  setSyncDot("sync");
+  try{
+    const r = await cloudPull(true);
+    setSyncDot("ok");
+    if(r.status==="pulled"){ render(); toast("Data terbaru ditarik dari GitHub"); }
+    else if(r.status==="empty"){ cloudPush(); }   // repo masih kosong → unggah lokal
+  }catch(e){
+    setSyncDot("err");
+    if(e.message==="AUTH") toast("Token GitHub ditolak — perbarui di Pengaturan",true);
+    else if(e.message!=="LOCKED") toast("Gagal menarik dari GitHub",true);
+  }
+}
+function setSyncDot(state){
+  const d=el("syncDot"); if(!d) return;
+  d.className="sync-dot "+(state||"");
+  d.title={sync:"Menyinkron…",ok:"Tersinkron ke GitHub",err:"Sinkron gagal"}[state]||"";
+}
+loadSync();
+
 
 /* ---------------- constants ---------------- */
 const KATEGORI=["Makanan & Minuman","Transportasi","Belanja","Tagihan & Utilitas","Kesehatan","Hiburan","Pendidikan","Tabungan & Investasi","Cicilan / Pinjaman","Donasi & Hadiah","Lainnya"];
@@ -85,7 +195,7 @@ function uid(){ return "t"+Math.random().toString(36).slice(2,9)+Date.now().toSt
 /* ---------------- state ---------------- */
 let S=null, filter="all";
 const monthKey=new Date().toISOString().slice(0,7);
-async function persist(){ await writeVault(); render(); }
+async function persist(){ await writeVault(); render(); cloudPush(); }
 
 /* ---------------- compute ---------------- */
 function calc(){
@@ -285,6 +395,8 @@ function openSettings(){
         <button class="btn btn-ghost" id="impBtn" style="flex:1;justify-content:center">${icoUpload} Impor cadangan</button>
       </div>
       <div style="height:10px"></div>
+      <div class="save-row"><button class="btn btn-ghost" id="syncBtn" style="flex:1;justify-content:center">${icoCloud} Sinkronisasi Cloud (GitHub)</button></div>
+      <div style="height:10px"></div>
       <div class="save-row"><button class="btn btn-ghost" id="pwBtn" style="flex:1;justify-content:center">${icoKey} Ganti kata sandi</button></div>
       <div style="height:10px"></div>
       <div class="save-row"><button class="btn btn-ghost" id="resetBtn" style="flex:1;justify-content:center;color:var(--red)">${icoReset} Reset ke nol (perlu kode email)</button></div>
@@ -294,8 +406,63 @@ function openSettings(){
   el("expBtn").onclick=exportBackup;
   el("impBtn").onclick=()=>el("impFile").click();
   el("impFile").onchange=importBackup;
+  el("syncBtn").onclick=openSync;
   el("pwBtn").onclick=openChangePass;
   el("resetBtn").onclick=openReset;
+}
+
+/* ---------------- modal: sinkronisasi GitHub ---------------- */
+function openSync(){
+  const c = SYNC || {owner:"",repo:"",path:"vault.json",branch:"main",token:""};
+  const on = syncReady();
+  sheet(`<div class="sheet-head"><h3>Sinkronisasi Cloud (GitHub)</h3>${closeBtn()}</div>
+    <div class="sheet-body">
+      <div class="hint" style="margin-bottom:14px">Simpan data (yang sudah <b>terenkripsi</b>) ke repo GitHub <b>privat</b> agar bisa dibuka di perangkat mana pun. Yang terkirim hanya teks terenkripsi — tanpa kata sandi Anda, tak terbaca. ${on?'<b style="color:var(--green)">Status: aktif.</b>':'<b style="color:var(--red)">Status: belum aktif.</b>'}</div>
+      <div class="field"><label>Username / owner GitHub</label><input id="y_owner" value="${esc(c.owner||"")}" placeholder="mis. bbkukuh"></div>
+      <div class="field"><label>Nama repo (PRIVAT, khusus data)</label><input id="y_repo" value="${esc(c.repo||"")}" placeholder="mis. saku-data"></div>
+      <div class="field"><label>Nama file</label><input id="y_path" value="${esc(c.path||"vault.json")}" placeholder="vault.json"></div>
+      <div class="field"><label>Branch</label><input id="y_branch" value="${esc(c.branch||"main")}" placeholder="main"></div>
+      <div class="field"><label>Fine-grained token (hanya repo ini, Contents: Read &amp; Write)</label><input type="password" id="y_token" value="${esc(c.token||"")}" placeholder="github_pat_..."></div>
+      <div class="hint">Token <b>tidak</b> ikut di-commit; tersimpan hanya di perangkat ini. Buat di GitHub → Settings → Developer settings → Fine-grained tokens, batasi ke repo data, beri izin <b>Contents: Read and write</b>.</div>
+      <div class="save-row" style="margin-top:6px">
+        <button class="btn btn-primary" id="y_save" style="flex:1;justify-content:center">Simpan &amp; Uji</button>
+      </div>
+      <div class="save-row">
+        <button class="btn btn-ghost" id="y_pull" style="flex:1;justify-content:center">${icoDownload} Tarik sekarang</button>
+        <button class="btn btn-ghost" id="y_push" style="flex:1;justify-content:center">${icoUpload} Unggah sekarang</button>
+      </div>
+      ${on?`<div class="save-row"><button class="btn btn-ghost" id="y_off" style="flex:1;justify-content:center;color:var(--red)">Putuskan dari perangkat ini</button></div>`:""}
+    </div>`);
+  const readForm=()=>({
+    owner:el("y_owner").value.trim(), repo:el("y_repo").value.trim(),
+    path:(el("y_path").value.trim()||"vault.json"), branch:(el("y_branch").value.trim()||"main"),
+    token:el("y_token").value.trim()
+  });
+  el("y_save").onclick=async()=>{
+    const cfg=readForm();
+    if(!cfg.owner||!cfg.repo||!cfg.token){ toast("Owner, repo, dan token wajib diisi",true); return; }
+    saveSync(cfg); REMOTE_SHA=null;
+    try{
+      const {wrap}=await ghGet();                 // uji koneksi
+      if(!wrap){ cloudPush(); toast("Tersambung. Data lokal diunggah."); }
+      else { const r=await cloudPull(true); if(r.status!=="pulled") cloudPush(); toast(r.status==="pulled"?"Tersambung. Data ditarik dari GitHub.":"Tersambung & sinkron."); render(); }
+      setSyncDot("ok"); close();
+    }catch(e){
+      setSyncDot("err");
+      toast(e.message==="AUTH"?"Token/izin ditolak GitHub":(e.message==="LOCKED"?"Buka kunci dulu":"Gagal menyambung — cek owner/repo/branch"),true);
+    }
+  };
+  el("y_pull").onclick=async()=>{
+    saveSync(readForm()); REMOTE_SHA=null;
+    try{ const r=await cloudPull(true); render(); toast(r.status==="pulled"?"Data ditarik":r.status==="empty"?"Repo masih kosong":"Sudah versi terbaru"); setSyncDot("ok"); }
+    catch(e){ setSyncDot("err"); toast(e.message==="AUTH"?"Token ditolak":"Gagal menarik",true); }
+  };
+  el("y_push").onclick=async()=>{
+    saveSync(readForm()); REMOTE_SHA=null;
+    try{ await ghGet().catch(()=>{}); await ghPut(readVault()); toast("Data diunggah ke GitHub"); setSyncDot("ok"); }
+    catch(e){ setSyncDot("err"); toast(e.message==="AUTH"?"Token ditolak":"Gagal mengunggah",true); }
+  };
+  if(el("y_off")) el("y_off").onclick=()=>{ clearSync(); setSyncDot(""); close(); toast("Sinkronisasi diputus dari perangkat ini"); };
 }
 
 function exportBackup(){
@@ -427,6 +594,7 @@ const icoDownload=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const icoUpload=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9M7 13l5-5 5 5M5 3h14"/></svg>`;
 const icoKey=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.5 12.5L20 3M16 7l3 3M14 9l3 3"/></svg>`;
 const icoReset=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-7 3.3M3 4v3.3H6.3"/></svg>`;
+const icoCloud=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18a4 4 0 01-.5-7.97A6 6 0 0118 9.5 3.5 3.5 0 0117.5 18z"/><path d="M12 12v6M9.5 15.5L12 18l2.5-2.5"/></svg>`;
 
 /* ---------------- helpers ---------------- */
 function el(id){return document.getElementById(id);}
@@ -455,7 +623,47 @@ function setupLockUI(){
   el("lockBtn").textContent=hasVault?"Buka":"Simpan & Buka";
   el("lockNote").textContent=hasVault?"Data dienkripsi (AES-256). Tanpa sandi, data tidak terbaca.":"Catat sandi Anda baik-baik. Jika lupa, data tidak bisa dipulihkan.";
   el("lockPass").value=""; el("lockPass2").value=""; showLockError("");
+  el("lockCloud").classList.toggle("hidden", false);   // selalu tersedia utk sambung perangkat
   setTimeout(()=>el("lockPass").focus(),60);
+}
+
+/* Sambungkan perangkat baru: tarik vault dari GitHub lalu buka dgn kata sandi */
+function openCloudConnect(){
+  const c = SYNC || {owner:SYNCDEF.owner||"",repo:SYNCDEF.repo||"",path:SYNCDEF.path||"vault.json",branch:SYNCDEF.branch||"main",token:""};
+  sheet(`<div class="sheet-head"><h3>Sambungkan ke GitHub</h3>${closeBtn()}</div>
+    <div class="sheet-body">
+      <div class="hint" style="margin-bottom:14px">Tarik data dari repo GitHub privat Anda, lalu buka dengan kata sandi yang sama seperti di perangkat lain.</div>
+      <div class="field"><label>Username / owner GitHub</label><input id="cc_owner" value="${esc(c.owner)}" placeholder="mis. bbkukuh"></div>
+      <div class="field"><label>Nama repo (privat)</label><input id="cc_repo" value="${esc(c.repo)}" placeholder="saku-data"></div>
+      <div class="field"><label>Nama file</label><input id="cc_path" value="${esc(c.path)}" placeholder="vault.json"></div>
+      <div class="field"><label>Branch</label><input id="cc_branch" value="${esc(c.branch)}" placeholder="main"></div>
+      <div class="field"><label>Fine-grained token</label><input type="password" id="cc_token" value="${esc(c.token||"")}" placeholder="github_pat_..."></div>
+      <div class="field"><label>Kata sandi Saku</label><input type="password" id="cc_pass" placeholder="Kata sandi yang sama"></div>
+      <div class="save-row"><button class="btn btn-primary" id="cc_go" style="flex:1;justify-content:center">Tarik &amp; Buka</button></div>
+    </div>`);
+  el("cc_go").onclick=async()=>{
+    const cfg={owner:el("cc_owner").value.trim(),repo:el("cc_repo").value.trim(),
+      path:(el("cc_path").value.trim()||"vault.json"),branch:(el("cc_branch").value.trim()||"main"),
+      token:el("cc_token").value.trim()};
+    const pass=el("cc_pass").value;
+    if(!cfg.owner||!cfg.repo||!cfg.token){ toast("Owner, repo, dan token wajib diisi",true); return; }
+    if(!pass){ toast("Isi kata sandi",true); return; }
+    saveSync(cfg); REMOTE_SHA=null; PASSWORD=pass;
+    try{
+      const {wrap}=await ghGet();
+      if(!wrap){ toast("Repo kosong — belum ada data di GitHub",true); return; }
+      const salt=unb64(wrap.salt), key=await deriveKey(pass,salt);
+      S=await decryptObj(key,wrap.blob);          // throws bila kata sandi salah
+      SALT=salt; CRYPTOKEY=key;
+      localStorage.setItem(VAULT_KEY, JSON.stringify(wrap));
+      close(); enterApp(); setSyncDot("ok"); toast("Tersambung — data ditarik dari GitHub");
+    }catch(e){
+      PASSWORD=null;
+      if(e.message==="AUTH") toast("Token/izin ditolak GitHub",true);
+      else if(e.name==="OperationError"||/decrypt/i.test(e.message)) toast("Kata sandi salah untuk data ini",true);
+      else toast("Gagal menyambung — cek owner/repo/branch",true);
+    }
+  };
 }
 async function tryUnlock(){
   const hasVault=!!readVault(); const pass=el("lockPass").value;
@@ -474,13 +682,15 @@ function enterApp(){
   el("app").classList.remove("hidden");
   el("todayLabel").textContent=new Date().toLocaleDateString("id-ID",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
   render();
+  cloudAutoPull();
 }
-function lockNow(){ CRYPTOKEY=null; S=null; el("app").classList.add("hidden"); el("lockScreen").classList.remove("hidden"); setupLockUI(); }
+function lockNow(){ CRYPTOKEY=null; PASSWORD=null; S=null; el("app").classList.add("hidden"); el("lockScreen").classList.remove("hidden"); setupLockUI(); }
 
 el("lockBtn").onclick=tryUnlock;
 el("lockPass").addEventListener("keydown",e=>{if(e.key==="Enter"){ if(readVault()) tryUnlock(); else el("lockPass2").focus(); }});
 el("lockPass2").addEventListener("keydown",e=>{if(e.key==="Enter")tryUnlock();});
 el("btnLock").onclick=lockNow;
+el("lockCloud").onclick=openCloudConnect;
 el("btnAdd").onclick=()=>{txTab="expense";openTx();};
 el("fab").onclick=()=>{txTab="expense";openTx();};
 el("btnSettings").onclick=openSettings;

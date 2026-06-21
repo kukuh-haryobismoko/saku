@@ -182,3 +182,12 @@ button{font-family:inherit; cursor:pointer; border:none; background:none}
   .tx-date{display:none}
   .acc-actions{opacity:1}
 }
+
+/* ---- indikator status sinkronisasi cloud ---- */
+.sync-dot{width:10px;height:10px;border-radius:50%;background:transparent;margin-right:8px;flex:0 0 auto;transition:background .25s,box-shadow .25s}
+.sync-dot.ok{background:#1BA876;box-shadow:0 0 0 3px rgba(27,168,118,.18)}
+.sync-dot.err{background:#EE4D2D;box-shadow:0 0 0 3px rgba(238,77,45,.18)}
+.sync-dot.sync{background:#B7791F;box-shadow:0 0 0 3px rgba(183,121,31,.18);animation:syncpulse 1s ease-in-out infinite}
+@keyframes syncpulse{0%,100%{opacity:1}50%{opacity:.35}}
+.lock-link{display:block;width:100%;margin-top:14px;background:none;border:none;color:#0A5DAE;font:inherit;font-size:13.5px;font-weight:600;cursor:pointer;padding:6px;border-radius:8px}
+.lock-link:hover{background:rgba(10,93,174,.07)}
