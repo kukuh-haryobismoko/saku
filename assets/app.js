@@ -323,7 +323,7 @@ function openTx(editId){
       <div class="save-row"><button class="btn btn-primary" id="saveTx" style="flex:1;justify-content:center">${editing?"Simpan Perubahan":"Simpan"}</button></div>
       ${editing?`<button class="del-link" id="delTx">${icoTrash} Hapus transaksi</button>`:""}
     </div>`);
-  if(!editing) qa("[data-tab]").forEach(b=>b.onclick=()=>{txTab=b.dataset.tab; el("txFormBody").innerHTML=body(); bindTrHint();});
+  if(!editing) qa("[data-tab]").forEach(b=>b.onclick=()=>{txTab=b.dataset.tab; qa("[data-tab]").forEach(x=>x.classList.toggle("active",x.dataset.tab===txTab)); el("txFormBody").innerHTML=body(); bindTrHint();});
   bindTrHint();
   el("saveTx").onclick=()=>{
     const amt=parseInt((el("f_amt").value||"").replace(/\D/g,""),10);
