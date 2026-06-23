@@ -82,8 +82,8 @@ function syncReady(){ return !!(SYNC&&SYNC.owner&&SYNC.repo&&SYNC.path&&SYNC.tok
 
 function ghHeaders(){ return { "Authorization":"Bearer "+SYNC.token, "Accept":"application/vnd.github+json", "X-GitHub-Api-Version":"2022-11-28" }; }
 function ghUrl(){ return `https://api.github.com/repos/${SYNC.owner}/${SYNC.repo}/contents/${SYNC.path.split("/").map(encodeURIComponent).join("/")}`; }
-const utf8b64  = s => btoa(unescape(encodeURIComponent(s)));
-const b64utf8  = s => decodeURIComponent(escape(atob(s.replace(/\n/g,""))));
+const utf8b64  = s => b64(enc.encode(s));
+const b64utf8  = s => dec.decode(unb64(s.replace(/\n/g,"")));
 
 async function ghGet(){
   const r = await fetch(ghUrl()+`?ref=${encodeURIComponent(SYNC.branch||"main")}`, {headers:ghHeaders()});
@@ -194,7 +194,6 @@ function uid(){ return "t"+Math.random().toString(36).slice(2,9)+Date.now().toSt
 
 /* ---------------- state ---------------- */
 let S=null, filter="all";
-const monthKey=new Date().toISOString().slice(0,7);
 async function persist(){ await writeVault(); render(); cloudPush(); }
 
 /* ---------------- compute ---------------- */
@@ -263,6 +262,7 @@ function render(){
       <div class="acc-foot">${foot}</div>${bar}</div>`;
   }).join("")+`<button class="add-acc" id="addAccBtn">${icoPlus}<span>Tambah Sumber Dana</span></button>`;
 
+  const monthKey=new Date().toISOString().slice(0,7);
   const mt=S.txns.filter(t=>t.date.slice(0,7)===monthKey);
   const catTotals={}; let outSum=0,inSum=0;
   mt.forEach(t=>{ if(t.kind==="expense"){catTotals[t.cat]=(catTotals[t.cat]||0)+t.amt; outSum+=t.amt;} if(t.kind==="income") inSum+=t.amt; });
@@ -327,7 +327,7 @@ function openTx(editId){
   if(!editing) qa("[data-tab]").forEach(b=>b.onclick=()=>{txTab=b.dataset.tab; qa("[data-tab]").forEach(x=>x.classList.toggle("active",x.dataset.tab===txTab)); el("txFormBody").innerHTML=body(); bindTrHint();});
   bindTrHint();
   el("saveTx").onclick=()=>{
-    const amt=parseInt((el("f_amt").value||"").replace(/\D/g,""),10);
+    const amt=numIn("f_amt");
     if(!amt||amt<=0){ toast("Isi jumlah dulu ya",true); return; }
     const base={date:el("f_date").value,desc:el("f_desc").value.trim(),amt};
     let obj;
@@ -338,9 +338,9 @@ function openTx(editId){
     else {
       obj.id=uid(); S.txns.push(obj);
       const mainAcc=txTab==="transfer"?el("f_from").value:el("f_acc").value;
-      const admin=parseInt((el("f_admin").value||"").replace(/\D/g,""),10);
+      const admin=numIn("f_admin");
       if(admin>0) S.txns.push({id:uid(),kind:"expense",date:base.date,desc:(base.desc||"Admin/Biaya")+" (admin)",amt:admin,cat:"Admin / Biaya",acc:mainAcc});
-      const cashback=parseInt((el("f_cashback").value||"").replace(/\D/g,""),10);
+      const cashback=numIn("f_cashback");
       if(cashback>0) S.txns.push({id:uid(),kind:"income",date:base.date,desc:(base.desc||"Cashback")+" (cashback)",amt:cashback,jenis:"Cashback",acc:el("f_cashback_acc").value});
     }
     persist(); close(); toast(editing?"Transaksi diperbarui":"Transaksi dicatat");
@@ -374,7 +374,7 @@ function openAcc(editId){
   qa("#a_sw .sw").forEach(s=>s.onclick=()=>{qa("#a_sw .sw").forEach(x=>x.classList.remove("sel"));s.classList.add("sel");color=s.dataset.c;});
   el("saveAcc").onclick=()=>{
     const name=el("a_name").value.trim(); if(!name){toast("Isi nama akun",true);return;}
-    const type=el("a_type").value, base=parseInt((el("a_base").value||"0").replace(/\D/g,""),10)||0;
+    const type=el("a_type").value, base=numIn("a_base");
     let mono=el("a_mono").value.trim().toUpperCase();
     if(!mono) mono=name.replace(/[^A-Za-z ]/g,"").split(/\s+/).map(w=>w[0]||"").join("").slice(0,3).toUpperCase()||name.slice(0,3).toUpperCase();
     if(editing) Object.assign(editing,{name,type,base,mono,color});
@@ -607,6 +607,7 @@ const icoCloud=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strok
 /* ---------------- helpers ---------------- */
 function el(id){return document.getElementById(id);}
 function qa(s){return [...document.querySelectorAll(s)];}
+function numIn(id){return parseInt((el(id).value||"").replace(/\D/g,""),10)||0;}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 function tint(v){const map={"var(--green)":"#e3f1e7","var(--red)":"#fbe6e3","var(--gold)":"#f6ecd8","var(--teal)":"#e0efef"};return map[v]||"#eef3f4";}
 
