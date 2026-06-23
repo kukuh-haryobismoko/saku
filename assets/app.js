@@ -162,8 +162,8 @@ loadSync();
 
 
 /* ---------------- constants ---------------- */
-const KATEGORI=["Makanan & Minuman","Transportasi","Belanja","Tagihan & Utilitas","Kesehatan","Hiburan","Pendidikan","Tabungan & Investasi","Cicilan / Pinjaman","Donasi & Hadiah","Lainnya"];
-const JENIS_MASUK=["Gaji","Bonus / THR","Pendapatan Usaha","Hasil Investasi","Transfer Masuk","Lainnya"];
+const KATEGORI=["Makanan & Minuman","Transportasi","Belanja","Tagihan & Utilitas","Kesehatan","Hiburan","Pendidikan","Tabungan & Investasi","Cicilan / Pinjaman","Donasi & Hadiah","Admin / Biaya","Lainnya"];
+const JENIS_MASUK=["Gaji","Bonus / THR","Pendapatan Usaha","Hasil Investasi","Transfer Masuk","Cashback","Lainnya"];
 const JENIS_TRANSFER=["Pembayaran Kartu Kredit","Investasi","Pencairan Investasi","Transfer Antar Rekening"];
 const TIPE=["Rekening","Investasi","Kartu Kredit","Paylater"];
 const SWATCHES=["#1B3A4B","#0A5DAE","#00529C","#003D79","#5B3FD6","#00A19A","#1BA876","#1E7E34","#B7791F","#EE4D2D","#7A1F2B","#C0392B"];
@@ -312,9 +312,10 @@ function openTx(editId){
     const date=`<div class="field"><label>Tanggal</label><input type="date" id="f_date" value="${d.date||today}"></div>`;
     const desc=`<div class="field"><label>Deskripsi</label><input id="f_desc" placeholder="mis. Makan siang" value="${editing?esc(d.desc||''):''}"></div>`;
     const amt =`<div class="field amt"><label>Jumlah (Rp)</label><input id="f_amt" inputmode="numeric" placeholder="0" value="${editing?d.amt:''}"></div>`;
-    if(txTab==="expense") return date+desc+`<div class="field"><label>Kategori</label><select id="f_cat">${optList(KATEGORI,d.cat)}</select></div>`+`<div class="field"><label>Sumber Dana</label><select id="f_acc">${optAcc(d.acc)}</select></div>`+amt+`<div class="hint">Rekening/Investasi → saldo berkurang. Kartu/Paylater → limit berkurang & utang bertambah.</div>`;
-    if(txTab==="income") return date+desc+`<div class="field"><label>Jenis</label><select id="f_jenis">${optList(JENIS_MASUK,d.jenis)}</select></div>`+`<div class="field"><label>Masuk ke</label><select id="f_acc">${optAcc(d.acc,["Rekening","Investasi"])}</select></div>`+amt+`<div class="hint">Untuk uang masuk dari luar (gaji, transfer, hasil investasi).</div>`;
-    return date+desc+`<div class="field"><label>Jenis</label><select id="f_jenis">${optList(JENIS_TRANSFER,d.jenis)}</select></div>`+`<div class="row2"><div class="field"><label>Dari</label><select id="f_from">${optAcc(d.from)}</select></div><div class="field"><label>Ke</label><select id="f_to">${optAcc(d.to)}</select></div></div>`+amt+`<div class="hint" id="trHint">Uang pindah antar akun — kekayaan bersih tidak berubah.</div>`;
+    const extras=editing?"":`<div class="row2"><div class="field"><label>Admin/Biaya (Rp, opsional)</label><input id="f_admin" inputmode="numeric" placeholder="0"></div><div class="field"><label>Cashback (Rp, opsional)</label><input id="f_cashback" inputmode="numeric" placeholder="0"></div></div><div class="field"><label>Cashback masuk ke</label><select id="f_cashback_acc">${optAcc(null,["Rekening","Investasi"])}</select></div>`;
+    if(txTab==="expense") return date+desc+`<div class="field"><label>Kategori</label><select id="f_cat">${optList(KATEGORI,d.cat)}</select></div>`+`<div class="field"><label>Sumber Dana</label><select id="f_acc">${optAcc(d.acc)}</select></div>`+amt+`<div class="hint">Rekening/Investasi → saldo berkurang. Kartu/Paylater → limit berkurang & utang bertambah.</div>`+extras;
+    if(txTab==="income") return date+desc+`<div class="field"><label>Jenis</label><select id="f_jenis">${optList(JENIS_MASUK,d.jenis)}</select></div>`+`<div class="field"><label>Masuk ke</label><select id="f_acc">${optAcc(d.acc,["Rekening","Investasi"])}</select></div>`+amt+`<div class="hint">Untuk uang masuk dari luar (gaji, transfer, hasil investasi).</div>`+extras;
+    return date+desc+`<div class="field"><label>Jenis</label><select id="f_jenis">${optList(JENIS_TRANSFER,d.jenis)}</select></div>`+`<div class="row2"><div class="field"><label>Dari</label><select id="f_from">${optAcc(d.from)}</select></div><div class="field"><label>Ke</label><select id="f_to">${optAcc(d.to)}</select></div></div>`+amt+`<div class="hint" id="trHint">Uang pindah antar akun — kekayaan bersih tidak berubah.</div>`+extras;
   }
   sheet(`<div class="sheet-head"><h3>${editing?"Ubah Transaksi":"Catat Transaksi"}</h3>${closeBtn()}</div>
     <div class="sheet-body">
@@ -334,7 +335,14 @@ function openTx(editId){
     else if(txTab==="income") obj={kind:"income",...base,jenis:el("f_jenis").value,acc:el("f_acc").value};
     else { const from=el("f_from").value,to=el("f_to").value; if(from===to){toast("Akun 'Dari' dan 'Ke' tidak boleh sama",true);return;} obj={kind:"transfer",...base,jenis:el("f_jenis").value,from,to}; }
     if(editing){ obj.id=editing.id; S.txns[S.txns.findIndex(t=>t.id===editing.id)]=obj; }
-    else { obj.id=uid(); S.txns.push(obj); }
+    else {
+      obj.id=uid(); S.txns.push(obj);
+      const mainAcc=txTab==="transfer"?el("f_from").value:el("f_acc").value;
+      const admin=parseInt((el("f_admin").value||"").replace(/\D/g,""),10);
+      if(admin>0) S.txns.push({id:uid(),kind:"expense",date:base.date,desc:(base.desc||"Admin/Biaya")+" (admin)",amt:admin,cat:"Admin / Biaya",acc:mainAcc});
+      const cashback=parseInt((el("f_cashback").value||"").replace(/\D/g,""),10);
+      if(cashback>0) S.txns.push({id:uid(),kind:"income",date:base.date,desc:(base.desc||"Cashback")+" (cashback)",amt:cashback,jenis:"Cashback",acc:el("f_cashback_acc").value});
+    }
     persist(); close(); toast(editing?"Transaksi diperbarui":"Transaksi dicatat");
   };
   if(editing) el("delTx").onclick=()=>{ S.txns=S.txns.filter(t=>t.id!==editing.id); persist(); close(); toast("Transaksi dihapus"); };
