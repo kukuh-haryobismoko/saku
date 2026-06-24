@@ -54,6 +54,8 @@ button{font-family:inherit; cursor:pointer; border:none; background:none}
 .hero-nw{font-family:"Bricolage Grotesque"; font-weight:800; font-size:clamp(38px,7vw,62px); line-height:1.02; margin:8px 0 4px; font-variant-numeric:tabular-nums}
 .hero-meta{color:#bcd4d8; font-size:13.5px}
 .hero-meta b{color:#fff; font-weight:600}
+.trend{margin-top:18px; position:relative; z-index:1; height:56px}
+.trend svg{width:100%; height:100%}
 .comp{margin-top:24px; position:relative; z-index:1}
 .comp-track{height:16px; border-radius:9px; background:rgba(255,255,255,.13); display:flex; overflow:hidden}
 .comp-seg{height:100%; transition:width .5s cubic-bezier(.4,0,.2,1)}
@@ -98,13 +100,16 @@ button{font-family:inherit; cursor:pointer; border:none; background:none}
 .add-acc:hover{border-color:var(--teal); color:var(--teal); background:var(--bg-2)}
 .add-acc svg{width:22px;height:22px}
 .panel{background:var(--surface); border-radius:var(--r); padding:18px; box-shadow:var(--shadow)}
-.panel h3{font-size:14px; color:var(--navy); font-weight:700; margin-bottom:4px}
+.panel h3{font-size:14px; color:var(--navy); font-weight:700; margin-bottom:4px; display:flex; align-items:center; justify-content:space-between}
+.link-btn{font-size:11.5px; font-weight:600; color:var(--teal); text-transform:none; letter-spacing:0}
+.link-btn:hover{color:var(--teal-700); text-decoration:underline}
 .panel .ph-sub{font-size:11.5px; color:var(--muted); margin-bottom:14px}
 .cat-row{display:flex; align-items:center; gap:11px; padding:7px 0}
 .cat-row .c-name{font-size:13px; width:128px; flex:none; color:var(--ink)}
 .cat-row .c-bar{flex:1; height:8px; background:var(--bg-2); border-radius:5px; overflow:hidden}
 .cat-row .c-bar > i{display:block; height:100%; background:linear-gradient(90deg,var(--teal),var(--teal-700)); border-radius:5px}
 .cat-row .c-val{font-family:"Space Grotesk"; font-size:12.5px; font-weight:600; width:96px; text-align:right; font-variant-numeric:tabular-nums; color:var(--ink)}
+.cat-row .c-budget{color:var(--muted); font-weight:500}
 .flow{display:flex; gap:11px; margin-top:14px}
 .flow > div{flex:1; background:var(--bg-2); border-radius:12px; padding:12px 13px}
 .flow .f-lab{font-size:11px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.05em}
@@ -115,6 +120,10 @@ button{font-family:inherit; cursor:pointer; border:none; background:none}
 .chip{height:34px; padding:0 14px; border-radius:10px; background:var(--surface); box-shadow:inset 0 0 0 1px var(--line); font-size:13px; font-weight:600; color:var(--muted); display:inline-flex; align-items:center; gap:6px}
 .chip.active{background:var(--navy); color:#fff; box-shadow:none}
 .chip:hover:not(.active){background:var(--bg-2)}
+.tx-search{display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap}
+.tx-search input{height:38px; border-radius:10px; border:1px solid var(--line); background:var(--surface); padding:0 12px; font-size:13px; font-family:inherit; color:var(--ink)}
+.tx-search input:focus{outline:none; border-color:var(--teal)}
+.tx-search input[type="search"]{flex:1; min-width:160px}
 .tx-list{background:var(--surface); border-radius:var(--r); box-shadow:var(--shadow); overflow:hidden}
 .tx{display:flex; align-items:center; gap:13px; padding:13px 16px; border-bottom:1px solid var(--line); transition:.12s}
 .tx:last-child{border-bottom:none}

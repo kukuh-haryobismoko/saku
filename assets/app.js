@@ -52,6 +52,7 @@ async function unlockVault(password){
   SALT = unb64(v.salt);
   const key = await deriveKey(password, SALT);
   S = await decryptObj(key, v.blob);   // throws if wrong password
+  normalizeState();
   CRYPTOKEY = key;
   PASSWORD = password;
 }
@@ -131,7 +132,7 @@ async function cloudPull(adopt){
     const salt = unb64(wrap.salt);
     const key  = await deriveKey(PASSWORD, salt);
     const data = await decryptObj(key, wrap.blob);   // throws bila kata sandi beda
-    S=data; SALT=salt; CRYPTOKEY=key;
+    S=data; normalizeState(); SALT=salt; CRYPTOKEY=key;
     localStorage.setItem(VAULT_KEY, JSON.stringify(wrap));
     return {status:"pulled"};
   }
@@ -187,19 +188,20 @@ function seed(){
   ];
   return {
     accounts: A.map((a,i)=>({ id:"a"+(i+1), name:a[0], type:a[1], base:a[2], color:a[3], mono:a[4] })),
-    txns: [], adjust: 0
+    txns: [], adjust: 0, budgets: {}, recurring: []
   };
 }
+function normalizeState(){ S.budgets=S.budgets||{}; S.recurring=S.recurring||[]; }
 function uid(){ return "t"+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-3); }
 
 /* ---------------- state ---------------- */
-let S=null, filter="all";
+let S=null, filter="all", txSearch="", txFrom="", txTo="";
 async function persist(){ await writeVault(); render(); cloudPush(); }
 
 /* ---------------- compute ---------------- */
-function calc(){
+function calc(cutoff){
   const m={}; S.accounts.forEach(a=>m[a.id]={in:0,out:0});
-  S.txns.forEach(t=>{
+  (cutoff?S.txns.filter(t=>t.date<=cutoff):S.txns).forEach(t=>{
     if(t.kind==="expense"){ if(m[t.acc]) m[t.acc].out+=t.amt; }
     else if(t.kind==="income"){ if(m[t.acc]) m[t.acc].in+=t.amt; }
     else if(t.kind==="transfer"){ if(m[t.from]) m[t.from].out+=t.amt; if(m[t.to]) m[t.to].in+=t.amt; }
@@ -232,6 +234,15 @@ function render(){
   el("compTrack").innerHTML=segs.map(s=>`<i class="comp-seg" style="width:${Math.max(0,s[1]/total*100)}%;background:${s[2]}"></i>`).join("");
   el("compLegend").innerHTML=segs.map(s=>`<span class="lg"><span class="dot" style="background:${s[2]}"></span>${s[0]} <b>${fmt(s[1])}</b></span>`).join("")
      +`<span class="lg"><span class="dot" style="background:var(--red)"></span>Utang <b>${fmt(c.debt)}</b></span>`;
+
+  const nets=[]; const now=new Date();
+  for(let i=5;i>=0;i--){
+    const d=new Date(now.getFullYear(),now.getMonth()-i+1,0);
+    nets.push(i===0?c.net:calc(d.toISOString().slice(0,10)).net);
+  }
+  const lo=Math.min(...nets), hi=Math.max(...nets), span=Math.max(1,hi-lo);
+  const pts=nets.map((v,i)=>`${i/(nets.length-1)*300},${52-(v-lo)/span*48}`).join(" ");
+  el("trendChart").innerHTML=`<polyline points="${pts}" fill="none" stroke="#7ee0a8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
 
   const kpis=[
     ["Total Aset",c.assets,"var(--green)",icoTrendUp],
@@ -269,7 +280,12 @@ function render(){
   const cats=Object.entries(catTotals).sort((a,b)=>b[1]-a[1]);
   const maxCat=Math.max(1,...cats.map(c=>c[1]));
   el("catSub").textContent=new Date(monthKey+"-01T00:00:00").toLocaleDateString("id-ID",{month:"long",year:"numeric"});
-  el("catList").innerHTML=cats.length?cats.map(([n,v])=>`<div class="cat-row"><span class="c-name">${n}</span><span class="c-bar"><i style="width:${v/maxCat*100}%"></i></span><span class="c-val num">${fmt(v)}</span></div>`).join("")
+  el("catList").innerHTML=cats.length?cats.map(([n,v])=>{
+    const b=S.budgets[n];
+    const pct=Math.min(100,v/maxCat*100);
+    const barCol=b&&v>b?"var(--red)":undefined;
+    return `<div class="cat-row"><span class="c-name">${n}</span><span class="c-bar"><i style="width:${pct}%${barCol?";background:"+barCol:""}"></i></span><span class="c-val num">${fmt(v)}${b?`<span class="c-budget">/ ${fmt(b)}</span>`:""}</span></div>`;
+  }).join("")
     :`<div style="color:var(--muted);font-size:13px;padding:10px 0">Belum ada pengeluaran bulan ini.</div>`;
   el("flowIn").textContent=fmt(inSum); el("flowOut").textContent=fmt(outSum);
   const net=inSum-outSum; el("flowNet").textContent=(net>=0?"":"−")+fmt(Math.abs(net)).replace("Rp","Rp ");
@@ -283,6 +299,9 @@ function render(){
   el("txCount").textContent=S.txns.length;
   let list=[...S.txns].sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0);
   if(filter!=="all") list=list.filter(t=>t.kind===filter);
+  if(txSearch) list=list.filter(t=>(t.desc||"").toLowerCase().includes(txSearch.toLowerCase()));
+  if(txFrom) list=list.filter(t=>t.date>=txFrom);
+  if(txTo) list=list.filter(t=>t.date<=txTo);
   el("txList").innerHTML=list.length?list.map(txRow).join(""):emptyState();
 }
 function txRow(t){
@@ -390,6 +409,85 @@ function openAcc(editId){
   };
 }
 
+/* ---------------- transaksi berulang ---------------- */
+function nextMonthDate(dateStr){
+  const [y,m,d]=dateStr.split("-").map(Number);
+  let ny=y, nm=m+1; if(nm>12){nm=1; ny++;}
+  const dim=new Date(ny,nm,0).getDate();
+  return `${ny}-${String(nm).padStart(2,"0")}-${String(Math.min(d,dim)).padStart(2,"0")}`;
+}
+function processRecurring(){
+  const today=new Date().toISOString().slice(0,10);
+  let changed=false;
+  S.recurring.forEach(r=>{
+    while(r.nextDate<=today){
+      const id=uid();
+      if(r.kind==="expense") S.txns.push({id,kind:"expense",date:r.nextDate,desc:r.desc,amt:r.amt,cat:r.cat,acc:r.acc});
+      else S.txns.push({id,kind:"income",date:r.nextDate,desc:r.desc,amt:r.amt,jenis:r.jenis,acc:r.acc});
+      r.nextDate=nextMonthDate(r.nextDate);
+      changed=true;
+    }
+  });
+  if(changed) persist();
+}
+function openRecurringList(){
+  sheet(`<div class="sheet-head"><h3>Transaksi Berulang</h3>${closeBtn()}</div>
+    <div class="sheet-body">
+      <div class="hint">Otomatis dicatat setiap bulan pada tanggal yang ditentukan.</div>
+      <div id="recurList">${S.recurring.length?S.recurring.map(r=>`<div class="cat-row"><span class="c-name" style="width:auto;flex:1">${esc(r.desc)} <span style="color:var(--muted)">(tgl ${r.nextDate.slice(8)})</span></span><span class="c-val num">${fmt(r.amt)}</span><button class="mini-btn danger" data-delrecur="${r.id}" style="margin-left:8px">${icoTrash}</button></div>`).join(""):`<div style="color:var(--muted);font-size:13px;padding:10px 0">Belum ada transaksi berulang.</div>`}</div>
+      <div class="save-row"><button class="btn btn-primary" id="addRecur" style="flex:1;justify-content:center">${icoPlus} Tambah</button></div>
+    </div>`);
+  qa("[data-delrecur]").forEach(b=>b.onclick=()=>{ S.recurring=S.recurring.filter(r=>r.id!==b.dataset.delrecur); persist(); openRecurringList(); });
+  el("addRecur").onclick=openRecurringForm;
+}
+let recurKind="expense";
+function openRecurringForm(){
+  recurKind="expense";
+  const optAcc=(types)=>S.accounts.filter(a=>!types||types.includes(a.type)).map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join("");
+  const optList=arr=>arr.map(o=>`<option>${o}</option>`).join("");
+  function body(){
+    return `<div class="field"><label>Deskripsi</label><input id="r_desc" placeholder="mis. Netflix"></div>`
+      +(recurKind==="expense"?`<div class="field"><label>Kategori</label><select id="r_cat">${optList(KATEGORI)}</select></div>`+`<div class="field"><label>Sumber Dana</label><select id="r_acc">${optAcc()}</select></div>`
+        :`<div class="field"><label>Jenis</label><select id="r_cat">${optList(JENIS_MASUK)}</select></div>`+`<div class="field"><label>Masuk ke</label><select id="r_acc">${optAcc(["Rekening","Investasi"])}</select></div>`)
+      +`<div class="field"><label>Jumlah (Rp)</label><input id="r_amt" inputmode="numeric" placeholder="0"></div>`
+      +`<div class="field"><label>Tanggal tiap bulan</label><input id="r_day" type="number" min="1" max="28" value="1"></div>`;
+  }
+  sheet(`<div class="sheet-head"><h3>Tambah Transaksi Berulang</h3>${closeBtn()}</div>
+    <div class="sheet-body">
+      <div class="tabs"><button class="tab active" data-rkind="expense">Pengeluaran</button><button class="tab" data-rkind="income">Pemasukan</button></div>
+      <div id="recurFormBody">${body()}</div>
+      <div class="save-row"><button class="btn btn-primary" id="saveRecur" style="flex:1;justify-content:center">Simpan</button></div>
+    </div>`);
+  qa("[data-rkind]").forEach(b=>b.onclick=()=>{ recurKind=b.dataset.rkind; qa("[data-rkind]").forEach(x=>x.classList.toggle("active",x.dataset.rkind===recurKind)); el("recurFormBody").innerHTML=body(); });
+  el("saveRecur").onclick=()=>{
+    const desc=el("r_desc").value.trim(), amt=numIn("r_amt"), day=Math.min(28,Math.max(1,parseInt(el("r_day").value,10)||1));
+    if(!desc||amt<=0){ toast("Isi deskripsi dan jumlah",true); return; }
+    const today=new Date(); const y=today.getFullYear(), m=today.getMonth()+1, dd=today.getDate();
+    let nextDate=`${y}-${String(m).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+    if(day<dd) nextDate=nextMonthDate(nextDate);
+    const r={id:uid(),kind:recurKind,desc,amt,acc:el("r_acc").value,nextDate};
+    if(recurKind==="expense") r.cat=el("r_cat").value; else r.jenis=el("r_cat").value;
+    S.recurring.push(r); persist(); openRecurringList(); toast("Transaksi berulang ditambah");
+  };
+}
+
+/* ---------------- modal: anggaran kategori ---------------- */
+function openBudgets(){
+  sheet(`<div class="sheet-head"><h3>Anggaran per Kategori</h3>${closeBtn()}</div>
+    <div class="sheet-body">
+      <div class="hint">Set batas bulanan per kategori (opsional). Kosongkan untuk tanpa batas.</div>
+      ${KATEGORI.map(c=>`<div class="field"><label>${c}</label><input data-budget="${c}" inputmode="numeric" placeholder="0" value="${S.budgets[c]||""}"></div>`).join("")}
+      <div class="save-row"><button class="btn btn-primary" id="saveBudgets" style="flex:1;justify-content:center">Simpan</button></div>
+    </div>`);
+  el("saveBudgets").onclick=()=>{
+    qa("[data-budget]").forEach(inp=>{
+      const v=parseInt((inp.value||"").replace(/\D/g,""),10);
+      if(v>0) S.budgets[inp.dataset.budget]=v; else delete S.budgets[inp.dataset.budget];
+    });
+    persist(); close(); toast("Anggaran disimpan");
+  };
+}
+
 /* ---------------- modal: settings ---------------- */
 function openSettings(){
   sheet(`<div class="sheet-head"><h3>Pengaturan</h3>${closeBtn()}</div>
@@ -403,6 +501,10 @@ function openSettings(){
         <button class="btn btn-ghost" id="impBtn" style="flex:1;justify-content:center">${icoUpload} Impor cadangan</button>
       </div>
       <div style="height:10px"></div>
+      <div class="save-row"><button class="btn btn-ghost" id="csvBtn" style="flex:1;justify-content:center">${icoDownload} Unduh CSV transaksi</button></div>
+      <div style="height:10px"></div>
+      <div class="save-row"><button class="btn btn-ghost" id="recurBtn" style="flex:1;justify-content:center">${icoReset} Transaksi Berulang</button></div>
+      <div style="height:10px"></div>
       <div class="save-row"><button class="btn btn-ghost" id="syncBtn" style="flex:1;justify-content:center">${icoCloud} Sinkronisasi Cloud (GitHub)</button></div>
       <div style="height:10px"></div>
       <div class="save-row"><button class="btn btn-ghost" id="pwBtn" style="flex:1;justify-content:center">${icoKey} Ganti kata sandi</button></div>
@@ -414,6 +516,8 @@ function openSettings(){
   el("expBtn").onclick=exportBackup;
   el("impBtn").onclick=()=>el("impFile").click();
   el("impFile").onchange=importBackup;
+  el("csvBtn").onclick=exportCSV;
+  el("recurBtn").onclick=openRecurringList;
   el("syncBtn").onclick=openSync;
   el("pwBtn").onclick=openChangePass;
   el("resetBtn").onclick=openReset;
@@ -479,13 +583,26 @@ function exportBackup(){
   a.download="saku-cadangan-"+new Date().toISOString().slice(0,10)+".json"; a.click();
   toast("Cadangan diunduh");
 }
+function exportCSV(){
+  const rows=[["Tanggal","Jenis","Deskripsi","Jumlah","Kategori/Jenis","Akun/Dari","Ke"]];
+  [...S.txns].sort((a,b)=>a.date<b.date?-1:1).forEach(t=>{
+    if(t.kind==="expense") rows.push([t.date,"Pengeluaran",t.desc||"",t.amt,t.cat,accById(t.acc)?.name||"",""]);
+    else if(t.kind==="income") rows.push([t.date,"Pemasukan",t.desc||"",t.amt,t.jenis,accById(t.acc)?.name||"",""]);
+    else rows.push([t.date,"Transfer",t.desc||"",t.amt,t.jenis,accById(t.from)?.name||"",accById(t.to)?.name||""]);
+  });
+  const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+  const blob=new Blob([csv],{type:"text/csv"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+  a.download="saku-transaksi-"+new Date().toISOString().slice(0,10)+".csv"; a.click();
+  toast("CSV diunduh");
+}
 function importBackup(e){
   const file=e.target.files[0]; if(!file) return;
   const r=new FileReader();
   r.onload=()=>{ try{
     const obj=JSON.parse(r.result);
     if(!obj.accounts||!Array.isArray(obj.txns)) throw 0;
-    S=obj; persist(); close(); toast("Cadangan diimpor");
+    S=obj; normalizeState(); persist(); close(); toast("Cadangan diimpor");
   }catch(err){ toast("File cadangan tidak valid",true); } };
   r.readAsText(file);
 }
@@ -663,6 +780,7 @@ function openCloudConnect(){
       if(!wrap){ toast("Repo kosong — belum ada data di GitHub",true); return; }
       const salt=unb64(wrap.salt), key=await deriveKey(pass,salt);
       S=await decryptObj(key,wrap.blob);          // throws bila kata sandi salah
+      normalizeState();
       SALT=salt; CRYPTOKEY=key;
       localStorage.setItem(VAULT_KEY, JSON.stringify(wrap));
       close(); enterApp(); setSyncDot("ok"); toast("Tersambung — data ditarik dari GitHub");
@@ -690,6 +808,7 @@ function enterApp(){
   el("lockScreen").classList.add("hidden");
   el("app").classList.remove("hidden");
   el("todayLabel").textContent=new Date().toLocaleDateString("id-ID",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+  processRecurring();
   render();
   cloudAutoPull();
 }
@@ -703,6 +822,10 @@ el("lockCloud").onclick=openCloudConnect;
 el("btnAdd").onclick=()=>{txTab="expense";openTx();};
 el("fab").onclick=()=>{txTab="expense";openTx();};
 el("btnSettings").onclick=openSettings;
+el("btnBudget").onclick=openBudgets;
+el("txSearch").oninput=()=>{txSearch=el("txSearch").value.trim(); render();};
+el("txFrom").onchange=()=>{txFrom=el("txFrom").value; render();};
+el("txTo").onchange=()=>{txTo=el("txTo").value; render();};
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&el("scrim").classList.contains("show"))close();});
 
 /* ---------------- boot ---------------- */
