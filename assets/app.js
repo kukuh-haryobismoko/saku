@@ -196,8 +196,17 @@ function uid(){ return "t"+Math.random().toString(36).slice(2,9)+Date.now().toSt
 
 /* ---------------- state ---------------- */
 let S=null, filter="all", txSearch="", txFrom="", txTo="";
-let recapPeriod="30", recapFrom="", recapTo="";
+let recapPeriod="30", recapFrom="", recapTo="", recapDate="";
 async function persist(){ await writeVault(); render(); cloudPush(); }
+
+/* ---------------- WIB (GMT+7) date helpers ----------------
+   "Today" must always mean the calendar day in Jakarta time, not
+   whatever the device's local timezone or UTC happens to be —
+   otherwise the date rolls over at the wrong wall-clock hour. */
+const WIB_MS=7*60*60*1000;
+const wibNow=()=>new Date(Date.now()+WIB_MS);
+const ymd=d=>`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
+const wibToday=()=>ymd(wibNow());
 
 /* ---------------- compute ---------------- */
 function calc(cutoff){
@@ -236,10 +245,10 @@ function render(){
   el("compLegend").innerHTML=segs.map(s=>`<span class="lg"><span class="dot" style="background:${s[2]}"></span>${s[0]} <b>${fmt(s[1])}</b></span>`).join("")
      +`<span class="lg"><span class="dot" style="background:var(--red)"></span>Debt <b>${fmt(c.debt)}</b></span>`;
 
-  const nets=[]; const now=new Date();
+  const nets=[]; const now=wibNow();
   for(let i=5;i>=0;i--){
-    const d=new Date(now.getFullYear(),now.getMonth()-i+1,0);
-    nets.push(i===0?c.net:calc(d.toISOString().slice(0,10)).net);
+    const d=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()-i+1,0));
+    nets.push(i===0?c.net:calc(ymd(d)).net);
   }
   const lo=Math.min(...nets), hi=Math.max(...nets), span=Math.max(1,hi-lo);
   const pts=nets.map((v,i)=>`${i/(nets.length-1)*300},${52-(v-lo)/span*48}`).join(" ");
@@ -251,7 +260,7 @@ function render(){
     ["Card Debt",c.debt,"var(--red)",icoCard],
     ["Limit Remaining",c.limit,"var(--teal)",icoShield],
   ];
-  el("kpis").innerHTML=kpis.map(k=>`<div class="kpi"><div class="k-top"><span class="k-ico" style="background:${tint(k[2])};color:${k[2]}">${k[3]}</span>${k[0]}</div><div class="k-val" style="color:${k[2]}">${fmt(k[1])}</div>${k[4]?`<div class="k-sub">${k[4]}</div>`:""}</div>`).join("");
+  el("kpis").innerHTML=kpis.map(k=>`<div class="kpi"><div class="k-top"><span class="k-ico" style="background:${tint(k[2])};color:${k[2]}">${k[3]}</span>${k[0]}</div><div class="k-val num" style="color:${k[2]}">${fmt(k[1])}</div>${k[4]?`<div class="k-sub">${k[4]}</div>`:""}</div>`).join("");
 
   el("accCount").textContent=S.accounts.length;
   el("accGrid").innerHTML=S.accounts.map(a=>{
@@ -274,7 +283,7 @@ function render(){
       <div class="acc-foot">${foot}</div>${bar}</div>`;
   }).join("")+`<button class="add-acc" id="addAccBtn">${icoPlus}<span>Add Account</span></button>`;
 
-  const monthKey=new Date().toISOString().slice(0,7);
+  const monthKey=wibToday().slice(0,7);
   const mt=S.txns.filter(t=>t.date.slice(0,7)===monthKey);
   const catTotals={}; let outSum=0,inSum=0;
   mt.forEach(t=>{ if(t.kind==="expense"){catTotals[t.cat]=(catTotals[t.cat]||0)+t.amt; outSum+=t.amt;} if(t.kind==="income") inSum+=t.amt; });
@@ -308,22 +317,24 @@ function render(){
   renderRecap();
 }
 function recapRange(){
-  const today=new Date(), todayStr=today.toISOString().slice(0,10);
+  const today=wibNow(), todayStr=ymd(today);
   if(recapPeriod==="7"||recapPeriod==="30"){
-    const from=new Date(today); from.setDate(from.getDate()-(recapPeriod==="7"?6:29));
-    return [from.toISOString().slice(0,10), todayStr];
+    const from=new Date(today); from.setUTCDate(from.getUTCDate()-(recapPeriod==="7"?6:29));
+    return [ymd(from), todayStr];
   }
   if(recapPeriod==="month") return [todayStr.slice(0,7)+"-01", todayStr];
   if(recapPeriod==="lastmonth"){
-    const from=new Date(today.getFullYear(),today.getMonth()-1,1).toISOString().slice(0,10);
-    const to=new Date(today.getFullYear(),today.getMonth(),0).toISOString().slice(0,10);
+    const from=ymd(new Date(Date.UTC(today.getUTCFullYear(),today.getUTCMonth()-1,1)));
+    const to=ymd(new Date(Date.UTC(today.getUTCFullYear(),today.getUTCMonth(),0)));
     return [from,to];
   }
+  if(recapPeriod==="date"){ const d=recapDate||todayStr; return [d,d]; }
   return [recapFrom||todayStr, recapTo||todayStr];
 }
 function renderRecap(){
-  const RC=[["7","7 Days"],["30","30 Days"],["month","This Month"],["lastmonth","Last Month"],["custom","Custom"]];
+  const RC=[["7","7 Days"],["30","30 Days"],["month","This Month"],["lastmonth","Last Month"],["date","Specific Date"],["custom","Custom Range"]];
   el("recapFilters").innerHTML=RC.map(f=>`<button class="chip ${recapPeriod===f[0]?"active":""}" data-recapf="${f[0]}">${f[1]}</button>`).join("");
+  el("recapDateWrap").classList.toggle("hidden",recapPeriod!=="date");
   el("recapCustomWrap").classList.toggle("hidden",recapPeriod!=="custom");
 
   const [from,to]=recapRange();
@@ -340,10 +351,17 @@ function renderRecap(){
   const net=inSum-outSum;
   el("recapNet").textContent=(net>=0?"":"−")+fmt(Math.abs(net)).replace("Rp","Rp ");
   el("recapNet").style.color=net>=0?"var(--green)":"var(--red)";
+
+  if(recapPeriod==="date"){
+    const list=S.txns.filter(t=>t.date===from&&(t.kind==="expense"||t.kind==="income")).sort((a,b)=>a.date<b.date?1:-1);
+    el("recapCount").textContent=list.length;
+    el("recapList").innerHTML=list.length?list.map(txRow).join(""):`<div style="color:var(--muted);font-size:13px;padding:10px 0">No transactions on this date.</div>`;
+    return;
+  }
   el("recapCount").textContent=dates.length;
   el("recapList").innerHTML=dates.length?dates.map(d=>{
     const x=days[d];
-    return `<div class="cat-row"><span class="c-name">${fmtDate(d)}</span><span style="flex:1"></span>
+    return `<div class="cat-row recap-row"><span class="c-name">${fmtDate(d)}</span><span style="flex:1"></span>
       <span class="c-val num" style="color:var(--green)">+${fmt(x.in)}</span>
       <span class="c-val num" style="color:var(--red)">−${fmt(x.out)}</span></div>`;
   }).join("")
@@ -371,7 +389,7 @@ function openTx(editId){
   if(editing) txTab=editing.kind;
   const optAcc=(sel,types)=>S.accounts.filter(a=>!types||types.includes(a.type)).map(a=>`<option value="${a.id}" ${sel===a.id?"selected":""}>${esc(a.name)}</option>`).join("");
   const optList=(arr,sel)=>arr.map(o=>`<option ${o===sel?"selected":""}>${o}</option>`).join("");
-  const today=new Date().toISOString().slice(0,10), d=editing||{};
+  const today=wibToday(), d=editing||{};
   function body(){
     const date=`<div class="field"><label>Date</label><input type="date" id="f_date" value="${d.date||today}"></div>`;
     const desc=`<div class="field"><label>Description</label><input id="f_desc" placeholder="e.g. Lunch" value="${editing?esc(d.desc||''):''}"></div>`;
@@ -462,7 +480,7 @@ function nextMonthDate(dateStr){
   return `${ny}-${String(nm).padStart(2,"0")}-${String(Math.min(d,dim)).padStart(2,"0")}`;
 }
 function processRecurring(){
-  const today=new Date().toISOString().slice(0,10);
+  const today=wibToday();
   let changed=false;
   S.recurring.forEach(r=>{
     while(r.nextDate<=today){
@@ -507,7 +525,7 @@ function openRecurringForm(){
   el("saveRecur").onclick=()=>{
     const desc=el("r_desc").value.trim(), amt=numIn("r_amt"), day=Math.min(28,Math.max(1,parseInt(el("r_day").value,10)||1));
     if(!desc||amt<=0){ toast("Fill in the description and amount",true); return; }
-    const today=new Date(); const y=today.getFullYear(), m=today.getMonth()+1, dd=today.getDate();
+    const today=wibNow(); const y=today.getUTCFullYear(), m=today.getUTCMonth()+1, dd=today.getUTCDate();
     let nextDate=`${y}-${String(m).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
     if(day<dd) nextDate=nextMonthDate(nextDate);
     const r={id:uid(),kind:recurKind,desc,amt,acc:el("r_acc").value,nextDate};
@@ -625,7 +643,7 @@ function openSync(){
 function exportBackup(){
   const blob=new Blob([JSON.stringify(S,null,2)],{type:"application/json"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
-  a.download="saku-backup-"+new Date().toISOString().slice(0,10)+".json"; a.click();
+  a.download="saku-backup-"+wibToday()+".json"; a.click();
   toast("Backup downloaded");
 }
 function exportCSV(){
@@ -638,7 +656,7 @@ function exportCSV(){
   const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
   const blob=new Blob([csv],{type:"text/csv"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
-  a.download="saku-transactions-"+new Date().toISOString().slice(0,10)+".csv"; a.click();
+  a.download="saku-transactions-"+wibToday()+".csv"; a.click();
   toast("CSV downloaded");
 }
 function importBackup(e){
@@ -853,7 +871,7 @@ async function tryUnlock(){
 function enterApp(){
   el("lockScreen").classList.add("hidden");
   el("app").classList.remove("hidden");
-  el("todayLabel").textContent=new Date().toLocaleDateString("en-US",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+  el("todayLabel").textContent=new Date().toLocaleDateString("en-US",{weekday:"long",day:"numeric",month:"long",year:"numeric",timeZone:"Asia/Jakarta"});
   processRecurring();
   render();
   cloudAutoPull();
@@ -872,6 +890,7 @@ el("btnBudget").onclick=openBudgets;
 el("txSearch").oninput=()=>{txSearch=el("txSearch").value.trim(); render();};
 el("txFrom").onchange=()=>{txFrom=el("txFrom").value; render();};
 el("txTo").onchange=()=>{txTo=el("txTo").value; render();};
+el("recapDate").onchange=()=>{recapDate=el("recapDate").value; render();};
 el("recapFrom").onchange=()=>{recapFrom=el("recapFrom").value; render();};
 el("recapTo").onchange=()=>{recapTo=el("recapTo").value; render();};
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&el("scrim").classList.contains("show"))close();});
