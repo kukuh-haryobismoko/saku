@@ -1,15 +1,15 @@
 "use strict";
 /* ===========================================================
-   Saku — catatan keuangan (statis, terenkripsi di perangkat)
+   Saku — personal finance tracker (static, encrypted on device)
    =========================================================== */
 const CONFIG = window.SAKU_CONFIG || { resetEmail:"", web3formsKey:"" };
 const VAULT_KEY = "saku.vault.v1";
-const SYNC_KEY  = "saku.sync.v1";              // konfigurasi sinkronisasi (lokal, tidak di-commit)
-const SYNCDEF   = (CONFIG.sync) || {};          // default non-rahasia dari config.js (owner/repo/path)
-let   PASSWORD  = null;                          // disimpan di memori sesi utk derive key vault remote
+const SYNC_KEY  = "saku.sync.v1";              // sync config (local, not committed)
+const SYNCDEF   = (CONFIG.sync) || {};          // non-secret defaults from config.js (owner/repo/path)
+let   PASSWORD  = null;                          // kept in session memory to derive the remote vault key
 let   SYNC      = null;                          // {owner,repo,path,branch,token}
-let   REMOTE_SHA= null;                          // sha file terakhir di GitHub (utk update aman)
-let   syncBusy  = false, syncDirty = false;      // pengatur antrian push
+let   REMOTE_SHA= null;                          // last file sha on GitHub (for safe updates)
+let   syncBusy  = false, syncDirty = false;      // push queue control
 
 /* ---------------- crypto (AES-GCM + PBKDF2) ---------------- */
 const enc = new TextEncoder(), dec = new TextDecoder();
@@ -51,7 +51,7 @@ async function unlockVault(password){
   const v = readVault();
   SALT = unb64(v.salt);
   const key = await deriveKey(password, SALT);
-  S = await decryptObj(key, v.blob);   // throws if wrong password
+  S = await decryptObj(key, v.blob);   // throws if the password is wrong
   normalizeState();
   CRYPTOKEY = key;
   PASSWORD = password;
@@ -65,12 +65,12 @@ async function changePassword(newPass){
 }
 
 /* ============================================================
-   SINKRONISASI CLOUD via GitHub Contents API
+   CLOUD SYNC via GitHub Contents API
    ------------------------------------------------------------
-   Menyimpan file vault (SUDAH terenkripsi AES-256) ke repo
-   GitHub PRIVAT. Token tidak pernah di-commit; ditempel
-   per-perangkat & disimpan di localStorage. Yang terkirim ke
-   GitHub hanya ciphertext — tanpa kata sandi, tak terbaca.
+   Stores the vault file (already AES-256 encrypted) in a
+   PRIVATE GitHub repo. The token is never committed; it is
+   pasted per-device & kept in localStorage. Only ciphertext
+   is ever sent to GitHub — unreadable without the password.
    ============================================================ */
 function loadSync(){
   try{ const s=JSON.parse(localStorage.getItem(SYNC_KEY)); if(s&&s.token){ SYNC=s; return s; } }catch(e){}
@@ -99,7 +99,7 @@ async function ghPut(wrap){
                  content: utf8b64(JSON.stringify(wrap)), branch: SYNC.branch||"main" };
   if(REMOTE_SHA) body.sha=REMOTE_SHA;
   let r = await fetch(ghUrl(), {method:"PUT", headers:{...ghHeaders(),"Content-Type":"application/json"}, body:JSON.stringify(body)});
-  if(r.status===409||r.status===422){           // sha basi → ambil sha terbaru lalu coba lagi
+  if(r.status===409||r.status===422){           // stale sha → fetch the latest one and retry
     await ghGet(); body.sha=REMOTE_SHA;
     r = await fetch(ghUrl(), {method:"PUT", headers:{...ghHeaders(),"Content-Type":"application/json"}, body:JSON.stringify(body)});
   }
@@ -108,7 +108,7 @@ async function ghPut(wrap){
   const j = await r.json(); REMOTE_SHA = j.content && j.content.sha;
 }
 
-// Unggah vault lokal ke GitHub (antri bila sedang sibuk)
+// Upload the local vault to GitHub (queue if already busy)
 function cloudPush(){
   if(!syncReady()) return;
   if(syncBusy){ syncDirty=true; return; }
@@ -116,11 +116,11 @@ function cloudPush(){
   const wrap = readVault();
   ghPut(wrap)
     .then(()=>{ setSyncDot("ok"); })
-    .catch(e=>{ setSyncDot("err"); if(e.message==="AUTH") toast("Token GitHub ditolak — perbarui di Pengaturan",true); else toast("Gagal sinkron ke GitHub",true); })
+    .catch(e=>{ setSyncDot("err"); if(e.message==="AUTH") toast("GitHub token rejected — update it in Settings",true); else toast("Failed to sync to GitHub",true); })
     .finally(()=>{ syncBusy=false; if(syncDirty){ syncDirty=false; cloudPush(); } });
 }
 
-// Tarik vault dari GitHub. adopt=true → pakai bila remote lebih baru (untuk perangkat lain).
+// Pull the vault from GitHub. adopt=true → adopt it if the remote is newer (for other devices).
 async function cloudPull(adopt){
   if(!syncReady()) return {status:"off"};
   const {wrap} = await ghGet();
@@ -131,7 +131,7 @@ async function cloudPull(adopt){
     if(PASSWORD==null) throw new Error("LOCKED");
     const salt = unb64(wrap.salt);
     const key  = await deriveKey(PASSWORD, salt);
-    const data = await decryptObj(key, wrap.blob);   // throws bila kata sandi beda
+    const data = await decryptObj(key, wrap.blob);   // throws if the password differs
     S=data; normalizeState(); SALT=salt; CRYPTOKEY=key;
     localStorage.setItem(VAULT_KEY, JSON.stringify(wrap));
     return {status:"pulled"};
@@ -139,51 +139,51 @@ async function cloudPull(adopt){
   return {status: remoteNewer?"remote-newer":"up-to-date"};
 }
 
-// Auto-pull saat masuk app
+// Auto-pull when entering the app
 async function cloudAutoPull(){
   if(!syncReady()) return;
   setSyncDot("sync");
   try{
     const r = await cloudPull(true);
     setSyncDot("ok");
-    if(r.status==="pulled"){ render(); toast("Data terbaru ditarik dari GitHub"); }
-    else if(r.status==="empty"){ cloudPush(); }   // repo masih kosong → unggah lokal
+    if(r.status==="pulled"){ render(); toast("Latest data pulled from GitHub"); }
+    else if(r.status==="empty"){ cloudPush(); }   // repo still empty → upload local data
   }catch(e){
     setSyncDot("err");
-    if(e.message==="AUTH") toast("Token GitHub ditolak — perbarui di Pengaturan",true);
-    else if(e.message!=="LOCKED") toast("Gagal menarik dari GitHub",true);
+    if(e.message==="AUTH") toast("GitHub token rejected — update it in Settings",true);
+    else if(e.message!=="LOCKED") toast("Failed to pull from GitHub",true);
   }
 }
 function setSyncDot(state){
   const d=el("syncDot"); if(!d) return;
   d.className="sync-dot "+(state||"");
-  d.title={sync:"Menyinkron…",ok:"Tersinkron ke GitHub",err:"Sinkron gagal"}[state]||"";
+  d.title={sync:"Syncing…",ok:"Synced to GitHub",err:"Sync failed"}[state]||"";
 }
 loadSync();
 
 
 /* ---------------- constants ---------------- */
-const KATEGORI=["Makanan & Minuman","Transportasi","Belanja","Tagihan & Utilitas","Kesehatan","Hiburan","Pendidikan","Tabungan & Investasi","Cicilan / Pinjaman","Donasi & Hadiah","Admin / Biaya","Lainnya"];
-const JENIS_MASUK=["Gaji","Bonus / THR","Pendapatan Usaha","Hasil Investasi","Transfer Masuk","Cashback","Lainnya"];
-const JENIS_TRANSFER=["Pembayaran Kartu Kredit","Investasi","Pencairan Investasi","Transfer Antar Rekening"];
-const TIPE=["Rekening","Investasi","Kartu Kredit","Paylater"];
+const KATEGORI=["Food & Drinks","Transportation","Shopping","Bills & Utilities","Health","Entertainment","Education","Savings & Investment","Installment / Loan","Donation & Gifts","Admin / Fees","Other"];
+const JENIS_MASUK=["Salary","Bonus","Business Income","Investment Returns","Incoming Transfer","Cashback","Other"];
+const JENIS_TRANSFER=["Credit Card Payment","Investment","Investment Withdrawal","Account Transfer"];
+const TIPE=["Bank Account","Investment","Credit Card","Paylater"];
 const SWATCHES=["#1B3A4B","#0A5DAE","#00529C","#003D79","#5B3FD6","#00A19A","#1BA876","#1E7E34","#B7791F","#EE4D2D","#7A1F2B","#C0392B"];
-const isAsset=t=>t==="Rekening"||t==="Investasi";
-const isDebt =t=>t==="Kartu Kredit"||t==="Paylater";
+const isAsset=t=>t==="Bank Account"||t==="Investment";
+const isDebt =t=>t==="Credit Card"||t==="Paylater";
 
-/* ---------------- seed (template tanpa saldo pribadi) ---------------- */
+/* ---------------- seed (template with no personal balances) ---------------- */
 function seed(){
   const A=[
-    ["Rekening BCA","Rekening",0,"#0A5DAE","BCA"],
-    ["Rekening Mandiri","Rekening",0,"#003D79","MDR"],
-    ["Dompet Tunai","Rekening",0,"#1E7E34","TUN"],
-    ["Rekening Krom","Rekening",0,"#5B3FD6","KRM"],
-    ["Rekening Seabank","Rekening",0,"#00A19A","SEA"],
-    ["Reksa Dana Bibit","Investasi",0,"#1BA876","BBT"],
-    ["Saham / RDN","Investasi",0,"#B7791F","SHM"],
-    ["Kartu Kredit BCA","Kartu Kredit",9000000,"#0A5DAE","BCA"],
-    ["Kartu Kredit BRI","Kartu Kredit",25000000,"#00529C","BRI"],
-    ["Kartu Kredit CIMB","Kartu Kredit",3000000,"#7A1F2B","CMB"],
+    ["BCA Account","Bank Account",0,"#0A5DAE","BCA"],
+    ["Mandiri Account","Bank Account",0,"#003D79","MDR"],
+    ["Cash Wallet","Bank Account",0,"#1E7E34","TUN"],
+    ["Krom Account","Bank Account",0,"#5B3FD6","KRM"],
+    ["Seabank Account","Bank Account",0,"#00A19A","SEA"],
+    ["Bibit Mutual Fund","Investment",0,"#1BA876","BBT"],
+    ["Stocks / RDN","Investment",0,"#B7791F","SHM"],
+    ["BCA Credit Card","Credit Card",9000000,"#0A5DAE","BCA"],
+    ["BRI Credit Card","Credit Card",25000000,"#00529C","BRI"],
+    ["CIMB Credit Card","Credit Card",3000000,"#7A1F2B","CMB"],
     ["Shopee Paylater","Paylater",25500000,"#EE4D2D","SPL"],
   ];
   return {
@@ -213,8 +213,8 @@ function calc(cutoff){
   });
   let cash=0,invest=0,debt=0,limit=0;
   S.accounts.forEach(a=>{ const x=m[a.id];
-    if(a.type==="Rekening")cash+=x.balance;
-    else if(a.type==="Investasi")invest+=x.balance;
+    if(a.type==="Bank Account")cash+=x.balance;
+    else if(a.type==="Investment")invest+=x.balance;
     else { debt+=x.debt; limit+=x.balance; }
   });
   const assets=cash+invest, net=assets-debt+(S.adjust||0);
@@ -222,19 +222,19 @@ function calc(cutoff){
 }
 const accById=id=>S.accounts.find(a=>a.id===id);
 const fmt=n=>new Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",maximumFractionDigits:0}).format(Math.round(n||0));
-const fmtShort=n=>{const v=Math.abs(n); if(v>=1e9)return (n/1e9).toFixed(1).replace(".0","")+" M"; if(v>=1e6)return (n/1e6).toFixed(1).replace(".0","")+" jt"; if(v>=1e3)return Math.round(n/1e3)+" rb"; return Math.round(n);};
-const fmtDate=d=>new Date(d+"T00:00:00").toLocaleDateString("id-ID",{day:"numeric",month:"short"});
+const fmtShort=n=>{const v=Math.abs(n); if(v>=1e9)return (n/1e9).toFixed(1).replace(".0","")+"B"; if(v>=1e6)return (n/1e6).toFixed(1).replace(".0","")+"M"; if(v>=1e3)return Math.round(n/1e3)+"K"; return Math.round(n);};
+const fmtDate=d=>new Date(d+"T00:00:00").toLocaleDateString("en-US",{day:"numeric",month:"short"});
 
 /* ---------------- render ---------------- */
 function render(){
   const c=calc();
   el("netWorth").textContent=fmt(c.net);
-  el("heroMeta").innerHTML=`Total aset <b>${fmt(c.assets)}</b> &nbsp;·&nbsp; Utang <b>${fmt(c.debt)}</b>`;
+  el("heroMeta").innerHTML=`Total assets <b>${fmt(c.assets)}</b> &nbsp;·&nbsp; Debt <b>${fmt(c.debt)}</b>`;
   const total=Math.max(c.assets,1);
-  const segs=[["Tunai & Rekening",c.cash,"var(--teal)"],["Investasi",c.invest,"var(--gold)"]];
+  const segs=[["Cash & Bank",c.cash,"var(--teal)"],["Investment",c.invest,"var(--gold)"]];
   el("compTrack").innerHTML=segs.map(s=>`<i class="comp-seg" style="width:${Math.max(0,s[1]/total*100)}%;background:${s[2]}"></i>`).join("");
   el("compLegend").innerHTML=segs.map(s=>`<span class="lg"><span class="dot" style="background:${s[2]}"></span>${s[0]} <b>${fmt(s[1])}</b></span>`).join("")
-     +`<span class="lg"><span class="dot" style="background:var(--red)"></span>Utang <b>${fmt(c.debt)}</b></span>`;
+     +`<span class="lg"><span class="dot" style="background:var(--red)"></span>Debt <b>${fmt(c.debt)}</b></span>`;
 
   const nets=[]; const now=new Date();
   for(let i=5;i>=0;i--){
@@ -246,10 +246,10 @@ function render(){
   el("trendChart").innerHTML=`<polyline points="${pts}" fill="none" stroke="#7ee0a8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
 
   const kpis=[
-    ["Total Aset",c.assets,"var(--green)",icoTrendUp],
-    ["Investasi",c.invest,"var(--gold)",icoChart,S.accounts.filter(a=>a.type==="Investasi").length+" akun"],
-    ["Utang Kartu",c.debt,"var(--red)",icoCard],
-    ["Sisa Limit",c.limit,"var(--teal)",icoShield],
+    ["Total Assets",c.assets,"var(--green)",icoTrendUp],
+    ["Investment",c.invest,"var(--gold)",icoChart,S.accounts.filter(a=>a.type==="Investment").length+" accounts"],
+    ["Card Debt",c.debt,"var(--red)",icoCard],
+    ["Limit Remaining",c.limit,"var(--teal)",icoShield],
   ];
   el("kpis").innerHTML=kpis.map(k=>`<div class="kpi"><div class="k-top"><span class="k-ico" style="background:${tint(k[2])};color:${k[2]}">${k[3]}</span>${k[0]}</div><div class="k-val" style="color:${k[2]}">${fmt(k[1])}</div>${k[4]?`<div class="k-sub">${k[4]}</div>`:""}</div>`).join("");
 
@@ -258,21 +258,21 @@ function render(){
     const x=c.m[a.id]; let foot="", bar="";
     if(isDebt(a.type)){
       const pct=Math.min(100,x.debt/Math.max(a.base,1)*100);
-      foot=`Limit ${fmtShort(a.base)} · sisa <b style="color:var(--teal)">${fmt(x.balance)}</b>`;
+      foot=`Limit ${fmtShort(a.base)} · remaining <b style="color:var(--teal)">${fmt(x.balance)}</b>`;
       const col=pct>80?"var(--red)":pct>50?"var(--gold)":"var(--teal)";
       bar=`<div class="usebar"><i style="width:${pct}%;background:${col}"></i></div>`;
-    } else foot=`Saldo awal ${fmtShort(a.base)}`;
+    } else foot=`Starting balance ${fmtShort(a.base)}`;
     const balColor=isDebt(a.type)?(x.debt>0?"var(--red)":"var(--ink)"):(x.balance<0?"var(--red)":"var(--ink)");
     const big=isDebt(a.type)?(x.debt>0?"−"+fmt(x.debt).replace("Rp","Rp "):fmt(0)):fmt(x.balance);
     return `<div class="acc">
       <div class="acc-actions">
-        <button class="mini-btn" data-editacc="${a.id}" title="Ubah">${icoEdit}</button>
-        <button class="mini-btn danger" data-delacc="${a.id}" title="Hapus">${icoTrash}</button></div>
+        <button class="mini-btn" data-editacc="${a.id}" title="Edit">${icoEdit}</button>
+        <button class="mini-btn danger" data-delacc="${a.id}" title="Delete">${icoTrash}</button></div>
       <div class="acc-top"><div class="logo" style="background:${a.color}">${esc(a.mono)}</div>
         <div><div class="acc-name">${esc(a.name)}</div><div class="acc-type">${a.type}</div></div></div>
       <div class="acc-bal num" style="color:${balColor}">${big}</div>
       <div class="acc-foot">${foot}</div>${bar}</div>`;
-  }).join("")+`<button class="add-acc" id="addAccBtn">${icoPlus}<span>Tambah Sumber Dana</span></button>`;
+  }).join("")+`<button class="add-acc" id="addAccBtn">${icoPlus}<span>Add Account</span></button>`;
 
   const monthKey=new Date().toISOString().slice(0,7);
   const mt=S.txns.filter(t=>t.date.slice(0,7)===monthKey);
@@ -280,21 +280,21 @@ function render(){
   mt.forEach(t=>{ if(t.kind==="expense"){catTotals[t.cat]=(catTotals[t.cat]||0)+t.amt; outSum+=t.amt;} if(t.kind==="income") inSum+=t.amt; });
   const cats=Object.entries(catTotals).sort((a,b)=>b[1]-a[1]);
   const maxCat=Math.max(1,...cats.map(c=>c[1]));
-  el("catSub").textContent=new Date(monthKey+"-01T00:00:00").toLocaleDateString("id-ID",{month:"long",year:"numeric"});
+  el("catSub").textContent=new Date(monthKey+"-01T00:00:00").toLocaleDateString("en-US",{month:"long",year:"numeric"});
   el("catList").innerHTML=cats.length?cats.map(([n,v])=>{
     const b=S.budgets[n];
     const pct=Math.min(100,v/maxCat*100);
     const barCol=b&&v>b?"var(--red)":undefined;
     return `<div class="cat-row"><span class="c-name">${n}</span><span class="c-bar"><i style="width:${pct}%${barCol?";background:"+barCol:""}"></i></span><span class="c-val num">${fmt(v)}${b?`<span class="c-budget">/ ${fmt(b)}</span>`:""}</span></div>`;
   }).join("")
-    :`<div style="color:var(--muted);font-size:13px;padding:10px 0">Belum ada pengeluaran bulan ini.</div>`;
+    :`<div style="color:var(--muted);font-size:13px;padding:10px 0">No expenses yet this month.</div>`;
   el("flowIn").textContent=fmt(inSum); el("flowOut").textContent=fmt(outSum);
   const net=inSum-outSum; el("flowNet").textContent=(net>=0?"":"−")+fmt(Math.abs(net)).replace("Rp","Rp ");
   el("flowNet").style.color=net>=0?"var(--green)":"var(--red)";
 
   const counts={all:S.txns.length,expense:0,income:0,transfer:0};
   S.txns.forEach(t=>counts[t.kind]++);
-  const Fr=[["all","Semua"],["expense","Pengeluaran"],["income","Pemasukan"],["transfer","Transfer & Investasi"]];
+  const Fr=[["all","All"],["expense","Expenses"],["income","Income"],["transfer","Transfer & Investment"]];
   el("txFilters").innerHTML=Fr.map(f=>`<button class="chip ${filter===f[0]?"active":""}" data-filter="${f[0]}">${f[1]}<span style="opacity:.6">${counts[f[0]]}</span></button>`).join("");
 
   el("txCount").textContent=S.txns.length;
@@ -322,7 +322,7 @@ function recapRange(){
   return [recapFrom||todayStr, recapTo||todayStr];
 }
 function renderRecap(){
-  const RC=[["7","7 Hari"],["30","30 Hari"],["month","Bulan Ini"],["lastmonth","Bulan Lalu"],["custom","Kustom"]];
+  const RC=[["7","7 Days"],["30","30 Days"],["month","This Month"],["lastmonth","Last Month"],["custom","Custom"]];
   el("recapFilters").innerHTML=RC.map(f=>`<button class="chip ${recapPeriod===f[0]?"active":""}" data-recapf="${f[0]}">${f[1]}</button>`).join("");
   el("recapCustomWrap").classList.toggle("hidden",recapPeriod!=="custom");
 
@@ -347,7 +347,7 @@ function renderRecap(){
       <span class="c-val num" style="color:var(--green)">+${fmt(x.in)}</span>
       <span class="c-val num" style="color:var(--red)">−${fmt(x.out)}</span></div>`;
   }).join("")
-    :`<div style="color:var(--muted);font-size:13px;padding:10px 0">Tidak ada transaksi di periode ini.</div>`;
+    :`<div style="color:var(--muted);font-size:13px;padding:10px 0">No transactions in this period.</div>`;
 }
 function txRow(t){
   let ico,amtTxt,amtCol,meta;
@@ -356,13 +356,13 @@ function txRow(t){
   else { const f=accById(t.from),to=accById(t.to); ico=icoSwap; amtTxt=fmt(t.amt); amtCol="var(--gold)"; meta=`<span class="pill">${t.jenis}</span> ${f?logoMini(f):"?"} <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.5" style="vertical-align:-1px"><path d="M5 12h14M13 6l6 6-6 6"/></svg> ${to?logoMini(to):"?"}`; }
   return `<div class="tx" data-edit="${t.id}">
     <div class="tx-ico" style="background:${tint(amtCol)};color:${amtCol}">${ico}</div>
-    <div class="tx-main"><div class="tx-desc">${esc(t.desc||"(tanpa deskripsi)")}</div><div class="tx-meta">${meta}</div></div>
+    <div class="tx-main"><div class="tx-desc">${esc(t.desc||"(no description)")}</div><div class="tx-meta">${meta}</div></div>
     <div class="tx-amt num" style="color:${amtCol}">${amtTxt}</div>
     <div class="tx-date num">${fmtDate(t.date)}</div>
-    <button class="tx-del" data-del="${t.id}" title="Hapus">${icoTrash}</button></div>`;
+    <button class="tx-del" data-del="${t.id}" title="Delete">${icoTrash}</button></div>`;
 }
 const logoMini=a=>`<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:13px;height:13px;border-radius:4px;background:${a.color};display:inline-block;vertical-align:-2px"></span>${esc(a.name)}</span>`;
-const emptyState=()=>`<div class="empty">${icoReceipt}<p>Belum ada transaksi di sini.<br>Ketuk <b>Catat Transaksi</b> untuk mulai.</p></div>`;
+const emptyState=()=>`<div class="empty">${icoReceipt}<p>No transactions here yet.<br>Tap <b>Add Transaction</b> to get started.</p></div>`;
 
 /* ---------------- modal: transaction ---------------- */
 let txTab="expense";
@@ -373,88 +373,88 @@ function openTx(editId){
   const optList=(arr,sel)=>arr.map(o=>`<option ${o===sel?"selected":""}>${o}</option>`).join("");
   const today=new Date().toISOString().slice(0,10), d=editing||{};
   function body(){
-    const date=`<div class="field"><label>Tanggal</label><input type="date" id="f_date" value="${d.date||today}"></div>`;
-    const desc=`<div class="field"><label>Deskripsi</label><input id="f_desc" placeholder="mis. Makan siang" value="${editing?esc(d.desc||''):''}"></div>`;
-    const amt =`<div class="field amt"><label>Jumlah (Rp)</label><input id="f_amt" inputmode="numeric" placeholder="0" value="${editing?d.amt:''}"></div>`;
-    const extras=editing?"":`<div class="row2"><div class="field"><label>Admin/Biaya (Rp, opsional)</label><input id="f_admin" inputmode="numeric" placeholder="0"></div><div class="field"><label>Cashback (Rp, opsional)</label><input id="f_cashback" inputmode="numeric" placeholder="0"></div></div><div class="field"><label>Cashback masuk ke</label><select id="f_cashback_acc">${optAcc(null,["Rekening","Investasi"])}</select></div>`;
-    if(txTab==="expense") return date+desc+`<div class="field"><label>Kategori</label><select id="f_cat">${optList(KATEGORI,d.cat)}</select></div>`+`<div class="field"><label>Sumber Dana</label><select id="f_acc">${optAcc(d.acc)}</select></div>`+amt+`<div class="hint">Rekening/Investasi → saldo berkurang. Kartu/Paylater → limit berkurang & utang bertambah.</div>`+extras;
-    if(txTab==="income") return date+desc+`<div class="field"><label>Jenis</label><select id="f_jenis">${optList(JENIS_MASUK,d.jenis)}</select></div>`+`<div class="field"><label>Masuk ke</label><select id="f_acc">${optAcc(d.acc,["Rekening","Investasi"])}</select></div>`+amt+`<div class="hint">Untuk uang masuk dari luar (gaji, transfer, hasil investasi).</div>`+extras;
-    return date+desc+`<div class="field"><label>Jenis</label><select id="f_jenis">${optList(JENIS_TRANSFER,d.jenis)}</select></div>`+`<div class="row2"><div class="field"><label>Dari</label><select id="f_from">${optAcc(d.from)}</select></div><div class="field"><label>Ke</label><select id="f_to">${optAcc(d.to)}</select></div></div>`+amt+`<div class="hint" id="trHint">Uang pindah antar akun — kekayaan bersih tidak berubah.</div>`+extras;
+    const date=`<div class="field"><label>Date</label><input type="date" id="f_date" value="${d.date||today}"></div>`;
+    const desc=`<div class="field"><label>Description</label><input id="f_desc" placeholder="e.g. Lunch" value="${editing?esc(d.desc||''):''}"></div>`;
+    const amt =`<div class="field amt"><label>Amount (Rp)</label><input id="f_amt" inputmode="numeric" placeholder="0" value="${editing?d.amt:''}"></div>`;
+    const extras=editing?"":`<div class="row2"><div class="field"><label>Admin/Fees (Rp, optional)</label><input id="f_admin" inputmode="numeric" placeholder="0"></div><div class="field"><label>Cashback (Rp, optional)</label><input id="f_cashback" inputmode="numeric" placeholder="0"></div></div><div class="field"><label>Cashback goes to</label><select id="f_cashback_acc">${optAcc(null,["Bank Account","Investment"])}</select></div>`;
+    if(txTab==="expense") return date+desc+`<div class="field"><label>Category</label><select id="f_cat">${optList(KATEGORI,d.cat)}</select></div>`+`<div class="field"><label>Account</label><select id="f_acc">${optAcc(d.acc)}</select></div>`+amt+`<div class="hint">Bank Account/Investment → balance decreases. Credit Card/Paylater → limit decreases & debt increases.</div>`+extras;
+    if(txTab==="income") return date+desc+`<div class="field"><label>Type</label><select id="f_jenis">${optList(JENIS_MASUK,d.jenis)}</select></div>`+`<div class="field"><label>Goes to</label><select id="f_acc">${optAcc(d.acc,["Bank Account","Investment"])}</select></div>`+amt+`<div class="hint">For money coming in from outside (salary, transfer, investment returns).</div>`+extras;
+    return date+desc+`<div class="field"><label>Type</label><select id="f_jenis">${optList(JENIS_TRANSFER,d.jenis)}</select></div>`+`<div class="row2"><div class="field"><label>From</label><select id="f_from">${optAcc(d.from)}</select></div><div class="field"><label>To</label><select id="f_to">${optAcc(d.to)}</select></div></div>`+amt+`<div class="hint" id="trHint">Money moves between accounts — net worth is unchanged.</div>`+extras;
   }
-  sheet(`<div class="sheet-head"><h3>${editing?"Ubah Transaksi":"Catat Transaksi"}</h3>${closeBtn()}</div>
+  sheet(`<div class="sheet-head"><h3>${editing?"Edit Transaction":"Add Transaction"}</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      ${editing?"":`<div class="tabs">${[["expense","Pengeluaran"],["income","Pemasukan"],["transfer","Transfer"]].map(t=>`<button class="tab ${txTab===t[0]?"active":""}" data-tab="${t[0]}">${t[1]}</button>`).join("")}</div>`}
+      ${editing?"":`<div class="tabs">${[["expense","Expense"],["income","Income"],["transfer","Transfer"]].map(t=>`<button class="tab ${txTab===t[0]?"active":""}" data-tab="${t[0]}">${t[1]}</button>`).join("")}</div>`}
       <div id="txFormBody">${body()}</div>
-      <div class="save-row"><button class="btn btn-primary" id="saveTx" style="flex:1;justify-content:center">${editing?"Simpan Perubahan":"Simpan"}</button></div>
-      ${editing?`<button class="del-link" id="delTx">${icoTrash} Hapus transaksi</button>`:""}
+      <div class="save-row"><button class="btn btn-primary" id="saveTx" style="flex:1;justify-content:center">${editing?"Save Changes":"Save"}</button></div>
+      ${editing?`<button class="del-link" id="delTx">${icoTrash} Delete transaction</button>`:""}
     </div>`);
   if(!editing) qa("[data-tab]").forEach(b=>b.onclick=()=>{txTab=b.dataset.tab; qa("[data-tab]").forEach(x=>x.classList.toggle("active",x.dataset.tab===txTab)); el("txFormBody").innerHTML=body(); bindTrHint();});
   bindTrHint();
   el("saveTx").onclick=()=>{
     const amt=numIn("f_amt");
-    if(!amt||amt<=0){ toast("Isi jumlah dulu ya",true); return; }
+    if(!amt||amt<=0){ toast("Fill in the amount first",true); return; }
     const base={date:el("f_date").value,desc:el("f_desc").value.trim(),amt};
     let obj;
     if(txTab==="expense") obj={kind:"expense",...base,cat:el("f_cat").value,acc:el("f_acc").value};
     else if(txTab==="income") obj={kind:"income",...base,jenis:el("f_jenis").value,acc:el("f_acc").value};
-    else { const from=el("f_from").value,to=el("f_to").value; if(from===to){toast("Akun 'Dari' dan 'Ke' tidak boleh sama",true);return;} obj={kind:"transfer",...base,jenis:el("f_jenis").value,from,to}; }
+    else { const from=el("f_from").value,to=el("f_to").value; if(from===to){toast("'From' and 'To' accounts can't be the same",true);return;} obj={kind:"transfer",...base,jenis:el("f_jenis").value,from,to}; }
     if(editing){ obj.id=editing.id; S.txns[S.txns.findIndex(t=>t.id===editing.id)]=obj; }
     else {
       obj.id=uid(); S.txns.push(obj);
       const mainAcc=txTab==="transfer"?el("f_from").value:el("f_acc").value;
       const admin=numIn("f_admin");
-      if(admin>0) S.txns.push({id:uid(),kind:"expense",date:base.date,desc:(base.desc||"Admin/Biaya")+" (admin)",amt:admin,cat:"Admin / Biaya",acc:mainAcc});
+      if(admin>0) S.txns.push({id:uid(),kind:"expense",date:base.date,desc:(base.desc||"Admin/Fees")+" (admin)",amt:admin,cat:"Admin / Fees",acc:mainAcc});
       const cashback=numIn("f_cashback");
       if(cashback>0) S.txns.push({id:uid(),kind:"income",date:base.date,desc:(base.desc||"Cashback")+" (cashback)",amt:cashback,jenis:"Cashback",acc:el("f_cashback_acc").value});
     }
-    persist(); close(); toast(editing?"Transaksi diperbarui":"Transaksi dicatat");
+    persist(); close(); toast(editing?"Transaction updated":"Transaction saved");
   };
-  if(editing) el("delTx").onclick=()=>{ S.txns=S.txns.filter(t=>t.id!==editing.id); persist(); close(); toast("Transaksi dihapus"); };
+  if(editing) el("delTx").onclick=()=>{ S.txns=S.txns.filter(t=>t.id!==editing.id); persist(); close(); toast("Transaction deleted"); };
 }
 function bindTrHint(){
   const h=el("trHint"); if(!h) return;
   const f=el("f_from"),t=el("f_to");
-  const upd=()=>{ if(f.value===t.value){h.className="hint warn"; h.textContent="⚠ Akun 'Dari' dan 'Ke' sama — pilih yang berbeda.";} else {h.className="hint"; h.textContent="Uang pindah antar akun — kekayaan bersih tidak berubah.";} };
+  const upd=()=>{ if(f.value===t.value){h.className="hint warn"; h.textContent="⚠ 'From' and 'To' accounts are the same — pick different ones.";} else {h.className="hint"; h.textContent="Money moves between accounts — net worth is unchanged.";} };
   f.onchange=upd; t.onchange=upd; upd();
 }
 
 /* ---------------- modal: account ---------------- */
 function openAcc(editId){
   const editing=editId?accById(editId):null;
-  const d=editing||{type:"Rekening",color:SWATCHES[0],base:0,mono:""};
-  sheet(`<div class="sheet-head"><h3>${editing?"Ubah Sumber Dana":"Tambah Sumber Dana"}</h3>${closeBtn()}</div>
+  const d=editing||{type:"Bank Account",color:SWATCHES[0],base:0,mono:""};
+  sheet(`<div class="sheet-head"><h3>${editing?"Edit Account":"Add Account"}</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      <div class="field"><label>Nama</label><input id="a_name" placeholder="mis. Rekening BCA" value="${editing?esc(d.name):''}"></div>
-      <div class="field"><label>Tipe</label><select id="a_type">${TIPE.map(t=>`<option ${d.type===t?"selected":""}>${t}</option>`).join("")}</select></div>
-      <div class="field"><label id="a_baselab">Saldo Awal / Limit (Rp)</label><input id="a_base" inputmode="numeric" placeholder="0" value="${d.base||""}"></div>
-      <div class="field"><label>Inisial logo</label><input id="a_mono" maxlength="4" placeholder="otomatis" value="${editing?esc(d.mono):''}" style="text-transform:uppercase"></div>
-      <div class="field"><label>Warna</label><div class="swatches" id="a_sw">${SWATCHES.map(c=>`<span class="sw ${c===d.color?"sel":""}" data-c="${c}" style="background:${c}"></span>`).join("")}</div></div>
-      <div class="save-row"><button class="btn btn-primary" id="saveAcc" style="flex:1;justify-content:center">${editing?"Simpan":"Tambah"}</button></div>
-      ${editing?`<button class="del-link" id="delAcc">${icoTrash} Hapus sumber dana</button>`:""}
+      <div class="field"><label>Name</label><input id="a_name" placeholder="e.g. BCA Account" value="${editing?esc(d.name):''}"></div>
+      <div class="field"><label>Type</label><select id="a_type">${TIPE.map(t=>`<option ${d.type===t?"selected":""}>${t}</option>`).join("")}</select></div>
+      <div class="field"><label id="a_baselab">Starting Balance / Limit (Rp)</label><input id="a_base" inputmode="numeric" placeholder="0" value="${d.base||""}"></div>
+      <div class="field"><label>Logo initials</label><input id="a_mono" maxlength="4" placeholder="auto" value="${editing?esc(d.mono):''}" style="text-transform:uppercase"></div>
+      <div class="field"><label>Color</label><div class="swatches" id="a_sw">${SWATCHES.map(c=>`<span class="sw ${c===d.color?"sel":""}" data-c="${c}" style="background:${c}"></span>`).join("")}</div></div>
+      <div class="save-row"><button class="btn btn-primary" id="saveAcc" style="flex:1;justify-content:center">${editing?"Save":"Add"}</button></div>
+      ${editing?`<button class="del-link" id="delAcc">${icoTrash} Delete account</button>`:""}
     </div>`);
   let color=d.color;
-  const lab=()=>{ el("a_baselab").textContent=isDebt(el("a_type").value)?"Limit (Rp)":"Saldo Awal (Rp)"; };
+  const lab=()=>{ el("a_baselab").textContent=isDebt(el("a_type").value)?"Limit (Rp)":"Starting Balance (Rp)"; };
   el("a_type").onchange=lab; lab();
   qa("#a_sw .sw").forEach(s=>s.onclick=()=>{qa("#a_sw .sw").forEach(x=>x.classList.remove("sel"));s.classList.add("sel");color=s.dataset.c;});
   el("saveAcc").onclick=()=>{
-    const name=el("a_name").value.trim(); if(!name){toast("Isi nama akun",true);return;}
+    const name=el("a_name").value.trim(); if(!name){toast("Enter an account name",true);return;}
     const type=el("a_type").value, base=numIn("a_base");
     let mono=el("a_mono").value.trim().toUpperCase();
     if(!mono) mono=name.replace(/[^A-Za-z ]/g,"").split(/\s+/).map(w=>w[0]||"").join("").slice(0,3).toUpperCase()||name.slice(0,3).toUpperCase();
     if(editing) Object.assign(editing,{name,type,base,mono,color});
     else S.accounts.push({id:"a"+uid(),name,type,base,mono,color});
-    persist(); close(); toast(editing?"Sumber dana diperbarui":"Sumber dana ditambah");
+    persist(); close(); toast(editing?"Account updated":"Account added");
   };
   if(editing) el("delAcc").onclick=()=>{
     const n=S.txns.filter(t=>t.acc===editing.id||t.from===editing.id||t.to===editing.id).length;
-    confirmBox(`Hapus "${editing.name}"?`, n?`Ada ${n} transaksi terkait yang ikut terhapus.`:"Tindakan ini tidak bisa dibatalkan.",()=>{
+    confirmBox(`Delete "${editing.name}"?`, n?`${n} related transactions will be deleted too.`:"This action cannot be undone.",()=>{
       S.txns=S.txns.filter(t=>t.acc!==editing.id&&t.from!==editing.id&&t.to!==editing.id);
-      S.accounts=S.accounts.filter(a=>a.id!==editing.id); persist(); close(); toast("Sumber dana dihapus");
+      S.accounts=S.accounts.filter(a=>a.id!==editing.id); persist(); close(); toast("Account deleted");
     });
   };
 }
 
-/* ---------------- transaksi berulang ---------------- */
+/* ---------------- recurring transactions ---------------- */
 function nextMonthDate(dateStr){
   const [y,m,d]=dateStr.split("-").map(Number);
   let ny=y, nm=m+1; if(nm>12){nm=1; ny++;}
@@ -476,11 +476,11 @@ function processRecurring(){
   if(changed) persist();
 }
 function openRecurringList(){
-  sheet(`<div class="sheet-head"><h3>Transaksi Berulang</h3>${closeBtn()}</div>
+  sheet(`<div class="sheet-head"><h3>Recurring Transactions</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      <div class="hint">Otomatis dicatat setiap bulan pada tanggal yang ditentukan.</div>
-      <div id="recurList">${S.recurring.length?S.recurring.map(r=>`<div class="cat-row"><span class="c-name" style="width:auto;flex:1">${esc(r.desc)} <span style="color:var(--muted)">(tgl ${r.nextDate.slice(8)})</span></span><span class="c-val num">${fmt(r.amt)}</span><button class="mini-btn danger" data-delrecur="${r.id}" style="margin-left:8px">${icoTrash}</button></div>`).join(""):`<div style="color:var(--muted);font-size:13px;padding:10px 0">Belum ada transaksi berulang.</div>`}</div>
-      <div class="save-row"><button class="btn btn-primary" id="addRecur" style="flex:1;justify-content:center">${icoPlus} Tambah</button></div>
+      <div class="hint">Automatically recorded every month on the chosen date.</div>
+      <div id="recurList">${S.recurring.length?S.recurring.map(r=>`<div class="cat-row"><span class="c-name" style="width:auto;flex:1">${esc(r.desc)} <span style="color:var(--muted)">(day ${r.nextDate.slice(8)})</span></span><span class="c-val num">${fmt(r.amt)}</span><button class="mini-btn danger" data-delrecur="${r.id}" style="margin-left:8px">${icoTrash}</button></div>`).join(""):`<div style="color:var(--muted);font-size:13px;padding:10px 0">No recurring transactions yet.</div>`}</div>
+      <div class="save-row"><button class="btn btn-primary" id="addRecur" style="flex:1;justify-content:center">${icoPlus} Add</button></div>
     </div>`);
   qa("[data-delrecur]").forEach(b=>b.onclick=()=>{ S.recurring=S.recurring.filter(r=>r.id!==b.dataset.delrecur); persist(); openRecurringList(); });
   el("addRecur").onclick=openRecurringForm;
@@ -491,73 +491,73 @@ function openRecurringForm(){
   const optAcc=(types)=>S.accounts.filter(a=>!types||types.includes(a.type)).map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join("");
   const optList=arr=>arr.map(o=>`<option>${o}</option>`).join("");
   function body(){
-    return `<div class="field"><label>Deskripsi</label><input id="r_desc" placeholder="mis. Netflix"></div>`
-      +(recurKind==="expense"?`<div class="field"><label>Kategori</label><select id="r_cat">${optList(KATEGORI)}</select></div>`+`<div class="field"><label>Sumber Dana</label><select id="r_acc">${optAcc()}</select></div>`
-        :`<div class="field"><label>Jenis</label><select id="r_cat">${optList(JENIS_MASUK)}</select></div>`+`<div class="field"><label>Masuk ke</label><select id="r_acc">${optAcc(["Rekening","Investasi"])}</select></div>`)
-      +`<div class="field"><label>Jumlah (Rp)</label><input id="r_amt" inputmode="numeric" placeholder="0"></div>`
-      +`<div class="field"><label>Tanggal tiap bulan</label><input id="r_day" type="number" min="1" max="28" value="1"></div>`;
+    return `<div class="field"><label>Description</label><input id="r_desc" placeholder="e.g. Netflix"></div>`
+      +(recurKind==="expense"?`<div class="field"><label>Category</label><select id="r_cat">${optList(KATEGORI)}</select></div>`+`<div class="field"><label>Account</label><select id="r_acc">${optAcc()}</select></div>`
+        :`<div class="field"><label>Type</label><select id="r_cat">${optList(JENIS_MASUK)}</select></div>`+`<div class="field"><label>Goes to</label><select id="r_acc">${optAcc(["Bank Account","Investment"])}</select></div>`)
+      +`<div class="field"><label>Amount (Rp)</label><input id="r_amt" inputmode="numeric" placeholder="0"></div>`
+      +`<div class="field"><label>Day of month</label><input id="r_day" type="number" min="1" max="28" value="1"></div>`;
   }
-  sheet(`<div class="sheet-head"><h3>Tambah Transaksi Berulang</h3>${closeBtn()}</div>
+  sheet(`<div class="sheet-head"><h3>Add Recurring Transaction</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      <div class="tabs"><button class="tab active" data-rkind="expense">Pengeluaran</button><button class="tab" data-rkind="income">Pemasukan</button></div>
+      <div class="tabs"><button class="tab active" data-rkind="expense">Expense</button><button class="tab" data-rkind="income">Income</button></div>
       <div id="recurFormBody">${body()}</div>
-      <div class="save-row"><button class="btn btn-primary" id="saveRecur" style="flex:1;justify-content:center">Simpan</button></div>
+      <div class="save-row"><button class="btn btn-primary" id="saveRecur" style="flex:1;justify-content:center">Save</button></div>
     </div>`);
   qa("[data-rkind]").forEach(b=>b.onclick=()=>{ recurKind=b.dataset.rkind; qa("[data-rkind]").forEach(x=>x.classList.toggle("active",x.dataset.rkind===recurKind)); el("recurFormBody").innerHTML=body(); });
   el("saveRecur").onclick=()=>{
     const desc=el("r_desc").value.trim(), amt=numIn("r_amt"), day=Math.min(28,Math.max(1,parseInt(el("r_day").value,10)||1));
-    if(!desc||amt<=0){ toast("Isi deskripsi dan jumlah",true); return; }
+    if(!desc||amt<=0){ toast("Fill in the description and amount",true); return; }
     const today=new Date(); const y=today.getFullYear(), m=today.getMonth()+1, dd=today.getDate();
     let nextDate=`${y}-${String(m).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
     if(day<dd) nextDate=nextMonthDate(nextDate);
     const r={id:uid(),kind:recurKind,desc,amt,acc:el("r_acc").value,nextDate};
     if(recurKind==="expense") r.cat=el("r_cat").value; else r.jenis=el("r_cat").value;
-    S.recurring.push(r); persist(); openRecurringList(); toast("Transaksi berulang ditambah");
+    S.recurring.push(r); persist(); openRecurringList(); toast("Recurring transaction added");
   };
 }
 
-/* ---------------- modal: anggaran kategori ---------------- */
+/* ---------------- modal: category budgets ---------------- */
 function openBudgets(){
-  sheet(`<div class="sheet-head"><h3>Anggaran per Kategori</h3>${closeBtn()}</div>
+  sheet(`<div class="sheet-head"><h3>Category Budgets</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      <div class="hint">Set batas bulanan per kategori (opsional). Kosongkan untuk tanpa batas.</div>
+      <div class="hint">Set a monthly limit per category (optional). Leave blank for no limit.</div>
       ${KATEGORI.map(c=>`<div class="field"><label>${c}</label><input data-budget="${c}" inputmode="numeric" placeholder="0" value="${S.budgets[c]||""}"></div>`).join("")}
-      <div class="save-row"><button class="btn btn-primary" id="saveBudgets" style="flex:1;justify-content:center">Simpan</button></div>
+      <div class="save-row"><button class="btn btn-primary" id="saveBudgets" style="flex:1;justify-content:center">Save</button></div>
     </div>`);
   el("saveBudgets").onclick=()=>{
     qa("[data-budget]").forEach(inp=>{
       const v=parseInt((inp.value||"").replace(/\D/g,""),10);
       if(v>0) S.budgets[inp.dataset.budget]=v; else delete S.budgets[inp.dataset.budget];
     });
-    persist(); close(); toast("Anggaran disimpan");
+    persist(); close(); toast("Budgets saved");
   };
 }
 
 /* ---------------- modal: settings ---------------- */
 function openSettings(){
-  sheet(`<div class="sheet-head"><h3>Pengaturan</h3>${closeBtn()}</div>
+  sheet(`<div class="sheet-head"><h3>Settings</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      <div class="field"><label>Penyesuaian Manual Saldo (Rp)</label><input id="s_adj" inputmode="numeric" value="${S.adjust||0}"></div>
-      <div class="hint">Koreksi kekayaan bersih. Set ke <b>0</b> bila semua saldo sudah tercatat. Boleh negatif.</div>
-      <div class="save-row"><button class="btn btn-primary" id="saveAdj" style="flex:1;justify-content:center">Simpan Penyesuaian</button></div>
+      <div class="field"><label>Manual Balance Adjustment (Rp)</label><input id="s_adj" inputmode="numeric" value="${S.adjust||0}"></div>
+      <div class="hint">Corrects net worth. Set to <b>0</b> once all balances are recorded. Can be negative.</div>
+      <div class="save-row"><button class="btn btn-primary" id="saveAdj" style="flex:1;justify-content:center">Save Adjustment</button></div>
       <div style="height:18px"></div>
       <div class="save-row">
-        <button class="btn btn-ghost" id="expBtn" style="flex:1;justify-content:center">${icoDownload} Unduh cadangan</button>
-        <button class="btn btn-ghost" id="impBtn" style="flex:1;justify-content:center">${icoUpload} Impor cadangan</button>
+        <button class="btn btn-ghost" id="expBtn" style="flex:1;justify-content:center">${icoDownload} Download backup</button>
+        <button class="btn btn-ghost" id="impBtn" style="flex:1;justify-content:center">${icoUpload} Import backup</button>
       </div>
       <div style="height:10px"></div>
-      <div class="save-row"><button class="btn btn-ghost" id="csvBtn" style="flex:1;justify-content:center">${icoDownload} Unduh CSV transaksi</button></div>
+      <div class="save-row"><button class="btn btn-ghost" id="csvBtn" style="flex:1;justify-content:center">${icoDownload} Download transactions CSV</button></div>
       <div style="height:10px"></div>
-      <div class="save-row"><button class="btn btn-ghost" id="recurBtn" style="flex:1;justify-content:center">${icoReset} Transaksi Berulang</button></div>
+      <div class="save-row"><button class="btn btn-ghost" id="recurBtn" style="flex:1;justify-content:center">${icoReset} Recurring Transactions</button></div>
       <div style="height:10px"></div>
-      <div class="save-row"><button class="btn btn-ghost" id="syncBtn" style="flex:1;justify-content:center">${icoCloud} Sinkronisasi Cloud (GitHub)</button></div>
+      <div class="save-row"><button class="btn btn-ghost" id="syncBtn" style="flex:1;justify-content:center">${icoCloud} Cloud Sync (GitHub)</button></div>
       <div style="height:10px"></div>
-      <div class="save-row"><button class="btn btn-ghost" id="pwBtn" style="flex:1;justify-content:center">${icoKey} Ganti kata sandi</button></div>
+      <div class="save-row"><button class="btn btn-ghost" id="pwBtn" style="flex:1;justify-content:center">${icoKey} Change password</button></div>
       <div style="height:10px"></div>
-      <div class="save-row"><button class="btn btn-ghost" id="resetBtn" style="flex:1;justify-content:center;color:var(--red)">${icoReset} Reset ke nol (perlu kode email)</button></div>
+      <div class="save-row"><button class="btn btn-ghost" id="resetBtn" style="flex:1;justify-content:center;color:var(--red)">${icoReset} Reset to zero (requires email code)</button></div>
       <input type="file" id="impFile" accept="application/json" class="hidden">
     </div>`);
-  el("saveAdj").onclick=()=>{ S.adjust=parseInt((el("s_adj").value||"0").replace(/[^\d-]/g,""),10)||0; persist(); close(); toast("Penyesuaian disimpan"); };
+  el("saveAdj").onclick=()=>{ S.adjust=parseInt((el("s_adj").value||"0").replace(/[^\d-]/g,""),10)||0; persist(); close(); toast("Adjustment saved"); };
   el("expBtn").onclick=exportBackup;
   el("impBtn").onclick=()=>el("impFile").click();
   el("impFile").onchange=importBackup;
@@ -568,27 +568,27 @@ function openSettings(){
   el("resetBtn").onclick=openReset;
 }
 
-/* ---------------- modal: sinkronisasi GitHub ---------------- */
+/* ---------------- modal: GitHub sync ---------------- */
 function openSync(){
   const c = SYNC || {owner:"",repo:"",path:"vault.json",branch:"main",token:""};
   const on = syncReady();
-  sheet(`<div class="sheet-head"><h3>Sinkronisasi Cloud (GitHub)</h3>${closeBtn()}</div>
+  sheet(`<div class="sheet-head"><h3>Cloud Sync (GitHub)</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      <div class="hint" style="margin-bottom:14px">Simpan data (yang sudah <b>terenkripsi</b>) ke repo GitHub <b>privat</b> agar bisa dibuka di perangkat mana pun. Yang terkirim hanya teks terenkripsi — tanpa kata sandi Anda, tak terbaca. ${on?'<b style="color:var(--green)">Status: aktif.</b>':'<b style="color:var(--red)">Status: belum aktif.</b>'}</div>
-      <div class="field"><label>Username / owner GitHub</label><input id="y_owner" value="${esc(c.owner||"")}" placeholder="mis. bbkukuh"></div>
-      <div class="field"><label>Nama repo (PRIVAT, khusus data)</label><input id="y_repo" value="${esc(c.repo||"")}" placeholder="mis. saku-data"></div>
-      <div class="field"><label>Nama file</label><input id="y_path" value="${esc(c.path||"vault.json")}" placeholder="vault.json"></div>
+      <div class="hint" style="margin-bottom:14px">Save your (already <b>encrypted</b>) data to a <b>private</b> GitHub repo so it can be opened on any device. Only encrypted text is sent — unreadable without your password. ${on?'<b style="color:var(--green)">Status: active.</b>':'<b style="color:var(--red)">Status: not active.</b>'}</div>
+      <div class="field"><label>GitHub username / owner</label><input id="y_owner" value="${esc(c.owner||"")}" placeholder="e.g. bbkukuh"></div>
+      <div class="field"><label>Repo name (PRIVATE, data only)</label><input id="y_repo" value="${esc(c.repo||"")}" placeholder="e.g. saku-data"></div>
+      <div class="field"><label>File name</label><input id="y_path" value="${esc(c.path||"vault.json")}" placeholder="vault.json"></div>
       <div class="field"><label>Branch</label><input id="y_branch" value="${esc(c.branch||"main")}" placeholder="main"></div>
-      <div class="field"><label>Fine-grained token (hanya repo ini, Contents: Read &amp; Write)</label><input type="password" id="y_token" value="${esc(c.token||"")}" placeholder="github_pat_..."></div>
-      <div class="hint">Token <b>tidak</b> ikut di-commit; tersimpan hanya di perangkat ini. Buat di GitHub → Settings → Developer settings → Fine-grained tokens, batasi ke repo data, beri izin <b>Contents: Read and write</b>.</div>
+      <div class="field"><label>Fine-grained token (this repo only, Contents: Read &amp; Write)</label><input type="password" id="y_token" value="${esc(c.token||"")}" placeholder="github_pat_..."></div>
+      <div class="hint">The token is <b>not</b> committed; it's kept only on this device. Create one at GitHub → Settings → Developer settings → Fine-grained tokens, scope it to the data repo, and grant <b>Contents: Read and write</b>.</div>
       <div class="save-row" style="margin-top:6px">
-        <button class="btn btn-primary" id="y_save" style="flex:1;justify-content:center">Simpan &amp; Uji</button>
+        <button class="btn btn-primary" id="y_save" style="flex:1;justify-content:center">Save &amp; Test</button>
       </div>
       <div class="save-row">
-        <button class="btn btn-ghost" id="y_pull" style="flex:1;justify-content:center">${icoDownload} Tarik sekarang</button>
-        <button class="btn btn-ghost" id="y_push" style="flex:1;justify-content:center">${icoUpload} Unggah sekarang</button>
+        <button class="btn btn-ghost" id="y_pull" style="flex:1;justify-content:center">${icoDownload} Pull now</button>
+        <button class="btn btn-ghost" id="y_push" style="flex:1;justify-content:center">${icoUpload} Push now</button>
       </div>
-      ${on?`<div class="save-row"><button class="btn btn-ghost" id="y_off" style="flex:1;justify-content:center;color:var(--red)">Putuskan dari perangkat ini</button></div>`:""}
+      ${on?`<div class="save-row"><button class="btn btn-ghost" id="y_off" style="flex:1;justify-content:center;color:var(--red)">Disconnect this device</button></div>`:""}
     </div>`);
   const readForm=()=>({
     owner:el("y_owner").value.trim(), repo:el("y_repo").value.trim(),
@@ -597,49 +597,49 @@ function openSync(){
   });
   el("y_save").onclick=async()=>{
     const cfg=readForm();
-    if(!cfg.owner||!cfg.repo||!cfg.token){ toast("Owner, repo, dan token wajib diisi",true); return; }
+    if(!cfg.owner||!cfg.repo||!cfg.token){ toast("Owner, repo, and token are required",true); return; }
     saveSync(cfg); REMOTE_SHA=null;
     try{
-      const {wrap}=await ghGet();                 // uji koneksi
-      if(!wrap){ cloudPush(); toast("Tersambung. Data lokal diunggah."); }
-      else { const r=await cloudPull(true); if(r.status!=="pulled") cloudPush(); toast(r.status==="pulled"?"Tersambung. Data ditarik dari GitHub.":"Tersambung & sinkron."); render(); }
+      const {wrap}=await ghGet();                 // test the connection
+      if(!wrap){ cloudPush(); toast("Connected. Local data uploaded."); }
+      else { const r=await cloudPull(true); if(r.status!=="pulled") cloudPush(); toast(r.status==="pulled"?"Connected. Data pulled from GitHub.":"Connected & synced."); render(); }
       setSyncDot("ok"); close();
     }catch(e){
       setSyncDot("err");
-      toast(e.message==="AUTH"?"Token/izin ditolak GitHub":(e.message==="LOCKED"?"Buka kunci dulu":"Gagal menyambung — cek owner/repo/branch"),true);
+      toast(e.message==="AUTH"?"Token/permission rejected by GitHub":(e.message==="LOCKED"?"Unlock first":"Failed to connect — check owner/repo/branch"),true);
     }
   };
   el("y_pull").onclick=async()=>{
     saveSync(readForm()); REMOTE_SHA=null;
-    try{ const r=await cloudPull(true); render(); toast(r.status==="pulled"?"Data ditarik":r.status==="empty"?"Repo masih kosong":"Sudah versi terbaru"); setSyncDot("ok"); }
-    catch(e){ setSyncDot("err"); toast(e.message==="AUTH"?"Token ditolak":"Gagal menarik",true); }
+    try{ const r=await cloudPull(true); render(); toast(r.status==="pulled"?"Data pulled":r.status==="empty"?"Repo is still empty":"Already up to date"); setSyncDot("ok"); }
+    catch(e){ setSyncDot("err"); toast(e.message==="AUTH"?"Token rejected":"Failed to pull",true); }
   };
   el("y_push").onclick=async()=>{
     saveSync(readForm()); REMOTE_SHA=null;
-    try{ await ghGet().catch(()=>{}); await ghPut(readVault()); toast("Data diunggah ke GitHub"); setSyncDot("ok"); }
-    catch(e){ setSyncDot("err"); toast(e.message==="AUTH"?"Token ditolak":"Gagal mengunggah",true); }
+    try{ await ghGet().catch(()=>{}); await ghPut(readVault()); toast("Data uploaded to GitHub"); setSyncDot("ok"); }
+    catch(e){ setSyncDot("err"); toast(e.message==="AUTH"?"Token rejected":"Failed to upload",true); }
   };
-  if(el("y_off")) el("y_off").onclick=()=>{ clearSync(); setSyncDot(""); close(); toast("Sinkronisasi diputus dari perangkat ini"); };
+  if(el("y_off")) el("y_off").onclick=()=>{ clearSync(); setSyncDot(""); close(); toast("Sync disconnected from this device"); };
 }
 
 function exportBackup(){
   const blob=new Blob([JSON.stringify(S,null,2)],{type:"application/json"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
-  a.download="saku-cadangan-"+new Date().toISOString().slice(0,10)+".json"; a.click();
-  toast("Cadangan diunduh");
+  a.download="saku-backup-"+new Date().toISOString().slice(0,10)+".json"; a.click();
+  toast("Backup downloaded");
 }
 function exportCSV(){
-  const rows=[["Tanggal","Jenis","Deskripsi","Jumlah","Kategori/Jenis","Akun/Dari","Ke"]];
+  const rows=[["Date","Type","Description","Amount","Category/Type","Account/From","To"]];
   [...S.txns].sort((a,b)=>a.date<b.date?-1:1).forEach(t=>{
-    if(t.kind==="expense") rows.push([t.date,"Pengeluaran",t.desc||"",t.amt,t.cat,accById(t.acc)?.name||"",""]);
-    else if(t.kind==="income") rows.push([t.date,"Pemasukan",t.desc||"",t.amt,t.jenis,accById(t.acc)?.name||"",""]);
+    if(t.kind==="expense") rows.push([t.date,"Expense",t.desc||"",t.amt,t.cat,accById(t.acc)?.name||"",""]);
+    else if(t.kind==="income") rows.push([t.date,"Income",t.desc||"",t.amt,t.jenis,accById(t.acc)?.name||"",""]);
     else rows.push([t.date,"Transfer",t.desc||"",t.amt,t.jenis,accById(t.from)?.name||"",accById(t.to)?.name||""]);
   });
   const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
   const blob=new Blob([csv],{type:"text/csv"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
-  a.download="saku-transaksi-"+new Date().toISOString().slice(0,10)+".csv"; a.click();
-  toast("CSV diunduh");
+  a.download="saku-transactions-"+new Date().toISOString().slice(0,10)+".csv"; a.click();
+  toast("CSV downloaded");
 }
 function importBackup(e){
   const file=e.target.files[0]; if(!file) return;
@@ -647,36 +647,36 @@ function importBackup(e){
   r.onload=()=>{ try{
     const obj=JSON.parse(r.result);
     if(!obj.accounts||!Array.isArray(obj.txns)) throw 0;
-    S=obj; normalizeState(); persist(); close(); toast("Cadangan diimpor");
-  }catch(err){ toast("File cadangan tidak valid",true); } };
+    S=obj; normalizeState(); persist(); close(); toast("Backup imported");
+  }catch(err){ toast("Invalid backup file",true); } };
   r.readAsText(file);
 }
 
 function openChangePass(){
-  sheet(`<div class="sheet-head"><h3>Ganti Kata Sandi</h3>${closeBtn()}</div>
+  sheet(`<div class="sheet-head"><h3>Change Password</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      <div class="field"><label>Kata sandi baru</label><input type="password" id="p_new" placeholder="Minimal 6 karakter"></div>
-      <div class="field"><label>Ulangi</label><input type="password" id="p_new2" placeholder="Ulangi kata sandi"></div>
-      <div class="hint">Data akan dienkripsi ulang dengan kata sandi baru. Jangan sampai lupa — tanpa sandi, data tidak bisa dibuka.</div>
-      <div class="save-row"><button class="btn btn-primary" id="p_save" style="flex:1;justify-content:center">Simpan</button></div>
+      <div class="field"><label>New password</label><input type="password" id="p_new" placeholder="At least 6 characters"></div>
+      <div class="field"><label>Confirm</label><input type="password" id="p_new2" placeholder="Confirm password"></div>
+      <div class="hint">Your data will be re-encrypted with the new password. Don't forget it — without the password, the data can't be unlocked.</div>
+      <div class="save-row"><button class="btn btn-primary" id="p_save" style="flex:1;justify-content:center">Save</button></div>
     </div>`);
   el("p_save").onclick=async()=>{
     const a=el("p_new").value,b=el("p_new2").value;
-    if(a.length<6){toast("Sandi minimal 6 karakter",true);return;}
-    if(a!==b){toast("Kedua sandi tidak sama",true);return;}
-    await changePassword(a); close(); toast("Kata sandi diganti");
+    if(a.length<6){toast("Password must be at least 6 characters",true);return;}
+    if(a!==b){toast("Passwords don't match",true);return;}
+    await changePassword(a); close(); toast("Password changed");
   };
 }
 
-/* ---------------- reset (kode via email) ---------------- */
+/* ---------------- reset (code via email) ---------------- */
 let pendingCode=null;
 async function sendResetCode(code){
   if(!CONFIG.web3formsKey) return {ok:false,reason:"nokey"};
   try{
     const res=await fetch("https://api.web3forms.com/submit",{
       method:"POST",headers:{"Content-Type":"application/json",Accept:"application/json"},
-      body:JSON.stringify({ access_key:CONFIG.web3formsKey, subject:"Kode Reset Saku", from_name:"Saku", email:CONFIG.resetEmail,
-        message:`Kode untuk mereset data Saku Anda ke nol: ${code}\n\nAbaikan email ini bila Anda tidak meminta reset.` })
+      body:JSON.stringify({ access_key:CONFIG.web3formsKey, subject:"Saku Reset Code", from_name:"Saku", email:CONFIG.resetEmail,
+        message:`Code to reset your Saku data to zero: ${code}\n\nIgnore this email if you did not request a reset.` })
     });
     const j=await res.json();
     return {ok:!!j.success,reason:j.message||""};
@@ -684,49 +684,49 @@ async function sendResetCode(code){
 }
 function doResetToZero(){
   S.txns=[]; S.accounts.forEach(a=>a.base=0); S.adjust=0;
-  persist(); close(); toast("Semua data direset ke nol");
+  persist(); close(); toast("All data reset to zero");
 }
 function openReset(){
   if(!CONFIG.web3formsKey){
-    sheet(`<div class="sheet-head"><h3>Reset Belum Aktif</h3>${closeBtn()}</div>
+    sheet(`<div class="sheet-head"><h3>Reset Not Set Up</h3>${closeBtn()}</div>
       <div class="sheet-body">
-        <div class="preview">Pengiriman kode ke <b>${esc(CONFIG.resetEmail||"email Anda")}</b> belum diatur.<br><br>
-        Buka <b>web3forms.com</b>, daftarkan email itu, salin <b>access key</b>, lalu tempel ke file <b>config.js</b> (lihat README).<br><br>
-        Atau, gunakan opsi cadangan di bawah untuk reset dengan kata sandi.</div>
-        <div class="save-row"><button class="btn btn-ghost" id="r_pw" style="flex:1;justify-content:center;color:var(--red)">Reset dengan kata sandi</button></div>
+        <div class="preview">Sending a code to <b>${esc(CONFIG.resetEmail||"your email")}</b> hasn't been configured yet.<br><br>
+        Sign up at <b>web3forms.com</b> with that email, copy the <b>access key</b>, then paste it into <b>config.js</b> (see README).<br><br>
+        Or, use the backup option below to reset with your password instead.</div>
+        <div class="save-row"><button class="btn btn-ghost" id="r_pw" style="flex:1;justify-content:center;color:var(--red)">Reset with password</button></div>
       </div>`);
     el("r_pw").onclick=()=>resetWithPassword();
     return;
   }
-  sheet(`<div class="sheet-head"><h3>Reset ke Nol</h3>${closeBtn()}</div>
+  sheet(`<div class="sheet-head"><h3>Reset to Zero</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      <div class="preview">Untuk keamanan, kode konfirmasi akan dikirim ke <b>${esc(CONFIG.resetEmail)}</b>. Semua transaksi & saldo akan dinolkan (akun tetap ada).</div>
-      <div class="save-row"><button class="btn btn-primary" id="r_send" style="flex:1;justify-content:center;background:var(--red)">Kirim kode ke email</button></div>
+      <div class="preview">For security, a confirmation code will be sent to <b>${esc(CONFIG.resetEmail)}</b>. All transactions & balances will be zeroed out (accounts stay).</div>
+      <div class="save-row"><button class="btn btn-primary" id="r_send" style="flex:1;justify-content:center;background:var(--red)">Send code to email</button></div>
     </div>`);
   el("r_send").onclick=async()=>{
-    el("r_send").textContent="Mengirim…"; el("r_send").disabled=true;
+    el("r_send").textContent="Sending…"; el("r_send").disabled=true;
     pendingCode=String(Math.floor(100000+Math.random()*900000));
     const r=await sendResetCode(pendingCode);
-    if(!r.ok){ toast("Gagal kirim email: "+(r.reason||"coba lagi"),true); el("r_send").textContent="Kirim kode ke email"; el("r_send").disabled=false; return; }
-    sheet(`<div class="sheet-head"><h3>Masukkan Kode</h3>${closeBtn()}</div>
+    if(!r.ok){ toast("Failed to send email: "+(r.reason||"try again"),true); el("r_send").textContent="Send code to email"; el("r_send").disabled=false; return; }
+    sheet(`<div class="sheet-head"><h3>Enter Code</h3>${closeBtn()}</div>
       <div class="sheet-body">
-        <div class="preview">Kode 6 digit dikirim ke <b>${esc(CONFIG.resetEmail)}</b>. Cek inbox/spam, lalu masukkan di bawah.</div>
-        <div class="field"><label>Kode konfirmasi</label><input id="r_code" inputmode="numeric" maxlength="6" placeholder="######" style="text-align:center;letter-spacing:.3em;font-family:'Space Grotesk'"></div>
-        <div class="save-row"><button class="btn btn-primary" id="r_confirm" style="flex:1;justify-content:center;background:var(--red)">Reset sekarang</button></div>
+        <div class="preview">A 6-digit code was sent to <b>${esc(CONFIG.resetEmail)}</b>. Check your inbox/spam, then enter it below.</div>
+        <div class="field"><label>Confirmation code</label><input id="r_code" inputmode="numeric" maxlength="6" placeholder="######" style="text-align:center;letter-spacing:.3em;font-family:'Space Grotesk'"></div>
+        <div class="save-row"><button class="btn btn-primary" id="r_confirm" style="flex:1;justify-content:center;background:var(--red)">Reset now</button></div>
       </div>`);
-    el("r_confirm").onclick=()=>{ if(el("r_code").value.trim()===pendingCode){ pendingCode=null; doResetToZero(); } else toast("Kode salah",true); };
+    el("r_confirm").onclick=()=>{ if(el("r_code").value.trim()===pendingCode){ pendingCode=null; doResetToZero(); } else toast("Wrong code",true); };
   };
 }
 function resetWithPassword(){
-  sheet(`<div class="sheet-head"><h3>Konfirmasi Reset</h3>${closeBtn()}</div>
+  sheet(`<div class="sheet-head"><h3>Confirm Reset</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      <div class="preview">Masukkan kata sandi Anda untuk menolkan semua transaksi & saldo.</div>
-      <div class="field"><label>Kata sandi</label><input type="password" id="r_pwf" placeholder="Kata sandi"></div>
-      <div class="save-row"><button class="btn btn-primary" id="r_pwgo" style="flex:1;justify-content:center;background:var(--red)">Reset ke nol</button></div>
+      <div class="preview">Enter your password to zero out all transactions & balances.</div>
+      <div class="field"><label>Password</label><input type="password" id="r_pwf" placeholder="Password"></div>
+      <div class="save-row"><button class="btn btn-primary" id="r_pwgo" style="flex:1;justify-content:center;background:var(--red)">Reset to zero</button></div>
     </div>`);
   el("r_pwgo").onclick=async()=>{
     try{ const v=readVault(); await decryptObj(await deriveKey(el("r_pwf").value, unb64(v.salt)), v.blob); doResetToZero(); }
-    catch(e){ toast("Kata sandi salah",true); }
+    catch(e){ toast("Wrong password",true); }
   };
 }
 
@@ -734,8 +734,8 @@ function resetWithPassword(){
 function confirmBox(title,msg,onYes){
   sheet(`<div class="sheet-head"><h3>${esc(title)}</h3></div>
     <div class="sheet-body"><div class="preview" style="margin-bottom:18px">${msg}</div>
-    <div class="save-row"><button class="btn btn-ghost" id="cNo" style="flex:1;justify-content:center">Batal</button>
-    <button class="btn btn-primary" id="cYes" style="flex:1;justify-content:center;background:var(--red)">Hapus</button></div></div>`);
+    <div class="save-row"><button class="btn btn-ghost" id="cNo" style="flex:1;justify-content:center">Cancel</button>
+    <button class="btn btn-primary" id="cYes" style="flex:1;justify-content:center;background:var(--red)">Delete</button></div></div>`);
   el("cNo").onclick=close; el("cYes").onclick=onYes;
 }
 function sheet(html){ el("sheet").innerHTML=html; el("scrim").classList.add("show"); document.body.style.overflow="hidden"; qa("[data-close]").forEach(b=>b.onclick=close); }
@@ -775,7 +775,7 @@ function tint(v){const map={"var(--green)":"#e3f1e7","var(--red)":"#fbe6e3","var
 
 /* ---------------- events ---------------- */
 document.addEventListener("click",e=>{
-  const ed=e.target.closest("[data-del]"); if(ed){e.stopPropagation(); const t=S.txns.find(x=>x.id===ed.dataset.del); confirmBox("Hapus transaksi?",esc(t&&t.desc||"")+" — "+fmt(t&&t.amt||0),()=>{S.txns=S.txns.filter(x=>x.id!==ed.dataset.del);persist();close();toast("Transaksi dihapus");}); return;}
+  const ed=e.target.closest("[data-del]"); if(ed){e.stopPropagation(); const t=S.txns.find(x=>x.id===ed.dataset.del); confirmBox("Delete transaction?",esc(t&&t.desc||"")+" — "+fmt(t&&t.amt||0),()=>{S.txns=S.txns.filter(x=>x.id!==ed.dataset.del);persist();close();toast("Transaction deleted");}); return;}
   const da=e.target.closest("[data-delacc]"); if(da){e.stopPropagation(); openAcc(da.dataset.delacc); setTimeout(()=>{const b=el("delAcc"); if(b)b.click();},0); return;}
   const ea=e.target.closest("[data-editacc]"); if(ea){e.stopPropagation(); openAcc(ea.dataset.editacc); return;}
   const ee=e.target.closest("[data-edit]"); if(ee){ openTx(ee.dataset.edit); return;}
@@ -789,52 +789,52 @@ document.addEventListener("click",e=>{
 function showLockError(msg){ el("lockErr").textContent=msg||""; }
 function setupLockUI(){
   const hasVault=!!readVault();
-  el("lockTitle").textContent=hasVault?"Buka Saku":"Buat Kata Sandi";
-  el("lockDesc").textContent=hasVault?"Masukkan kata sandi untuk membuka catatan keuangan Anda.":"Buat kata sandi untuk mengunci & mengenkripsi data Anda di perangkat ini.";
+  el("lockTitle").textContent=hasVault?"Unlock Saku":"Create Password";
+  el("lockDesc").textContent=hasVault?"Enter your password to unlock your financial records.":"Create a password to lock & encrypt your data on this device.";
   el("lockPass2").classList.toggle("hidden",hasVault);
-  el("lockBtn").textContent=hasVault?"Buka":"Simpan & Buka";
-  el("lockNote").textContent=hasVault?"Data dienkripsi (AES-256). Tanpa sandi, data tidak terbaca.":"Catat sandi Anda baik-baik. Jika lupa, data tidak bisa dipulihkan.";
+  el("lockBtn").textContent=hasVault?"Unlock":"Save & Unlock";
+  el("lockNote").textContent=hasVault?"Data is encrypted (AES-256). Without the password, it can't be read.":"Write down your password carefully. If you forget it, the data can't be recovered.";
   el("lockPass").value=""; el("lockPass2").value=""; showLockError("");
-  el("lockCloud").classList.toggle("hidden", false);   // selalu tersedia utk sambung perangkat
+  el("lockCloud").classList.toggle("hidden", false);   // always available to connect a device
   setTimeout(()=>el("lockPass").focus(),60);
 }
 
-/* Sambungkan perangkat baru: tarik vault dari GitHub lalu buka dgn kata sandi */
+/* Connect a new device: pull the vault from GitHub, then unlock with the password */
 function openCloudConnect(){
   const c = SYNC || {owner:SYNCDEF.owner||"",repo:SYNCDEF.repo||"",path:SYNCDEF.path||"vault.json",branch:SYNCDEF.branch||"main",token:""};
-  sheet(`<div class="sheet-head"><h3>Sambungkan ke GitHub</h3>${closeBtn()}</div>
+  sheet(`<div class="sheet-head"><h3>Connect to GitHub</h3>${closeBtn()}</div>
     <div class="sheet-body">
-      <div class="hint" style="margin-bottom:14px">Tarik data dari repo GitHub privat Anda, lalu buka dengan kata sandi yang sama seperti di perangkat lain.</div>
-      <div class="field"><label>Username / owner GitHub</label><input id="cc_owner" value="${esc(c.owner)}" placeholder="mis. bbkukuh"></div>
-      <div class="field"><label>Nama repo (privat)</label><input id="cc_repo" value="${esc(c.repo)}" placeholder="saku-data"></div>
-      <div class="field"><label>Nama file</label><input id="cc_path" value="${esc(c.path)}" placeholder="vault.json"></div>
+      <div class="hint" style="margin-bottom:14px">Pull data from your private GitHub repo, then unlock with the same password used on your other device.</div>
+      <div class="field"><label>GitHub username / owner</label><input id="cc_owner" value="${esc(c.owner)}" placeholder="e.g. bbkukuh"></div>
+      <div class="field"><label>Repo name (private)</label><input id="cc_repo" value="${esc(c.repo)}" placeholder="saku-data"></div>
+      <div class="field"><label>File name</label><input id="cc_path" value="${esc(c.path)}" placeholder="vault.json"></div>
       <div class="field"><label>Branch</label><input id="cc_branch" value="${esc(c.branch)}" placeholder="main"></div>
       <div class="field"><label>Fine-grained token</label><input type="password" id="cc_token" value="${esc(c.token||"")}" placeholder="github_pat_..."></div>
-      <div class="field"><label>Kata sandi Saku</label><input type="password" id="cc_pass" placeholder="Kata sandi yang sama"></div>
-      <div class="save-row"><button class="btn btn-primary" id="cc_go" style="flex:1;justify-content:center">Tarik &amp; Buka</button></div>
+      <div class="field"><label>Saku password</label><input type="password" id="cc_pass" placeholder="The same password"></div>
+      <div class="save-row"><button class="btn btn-primary" id="cc_go" style="flex:1;justify-content:center">Pull &amp; Unlock</button></div>
     </div>`);
   el("cc_go").onclick=async()=>{
     const cfg={owner:el("cc_owner").value.trim(),repo:el("cc_repo").value.trim(),
       path:(el("cc_path").value.trim()||"vault.json"),branch:(el("cc_branch").value.trim()||"main"),
       token:el("cc_token").value.trim()};
     const pass=el("cc_pass").value;
-    if(!cfg.owner||!cfg.repo||!cfg.token){ toast("Owner, repo, dan token wajib diisi",true); return; }
-    if(!pass){ toast("Isi kata sandi",true); return; }
+    if(!cfg.owner||!cfg.repo||!cfg.token){ toast("Owner, repo, and token are required",true); return; }
+    if(!pass){ toast("Enter the password",true); return; }
     saveSync(cfg); REMOTE_SHA=null; PASSWORD=pass;
     try{
       const {wrap}=await ghGet();
-      if(!wrap){ toast("Repo kosong — belum ada data di GitHub",true); return; }
+      if(!wrap){ toast("Repo is empty — no data on GitHub yet",true); return; }
       const salt=unb64(wrap.salt), key=await deriveKey(pass,salt);
-      S=await decryptObj(key,wrap.blob);          // throws bila kata sandi salah
+      S=await decryptObj(key,wrap.blob);          // throws if the password is wrong
       normalizeState();
       SALT=salt; CRYPTOKEY=key;
       localStorage.setItem(VAULT_KEY, JSON.stringify(wrap));
-      close(); enterApp(); setSyncDot("ok"); toast("Tersambung — data ditarik dari GitHub");
+      close(); enterApp(); setSyncDot("ok"); toast("Connected — data pulled from GitHub");
     }catch(e){
       PASSWORD=null;
-      if(e.message==="AUTH") toast("Token/izin ditolak GitHub",true);
-      else if(e.name==="OperationError"||/decrypt/i.test(e.message)) toast("Kata sandi salah untuk data ini",true);
-      else toast("Gagal menyambung — cek owner/repo/branch",true);
+      if(e.message==="AUTH") toast("Token/permission rejected by GitHub",true);
+      else if(e.name==="OperationError"||/decrypt/i.test(e.message)) toast("Wrong password for this data",true);
+      else toast("Failed to connect — check owner/repo/branch",true);
     }
   };
 }
@@ -842,18 +842,18 @@ async function tryUnlock(){
   const hasVault=!!readVault(); const pass=el("lockPass").value;
   showLockError("");
   if(!hasVault){
-    if(pass.length<6){ showLockError("Sandi minimal 6 karakter."); return; }
-    if(pass!==el("lockPass2").value){ showLockError("Kedua sandi tidak sama."); return; }
+    if(pass.length<6){ showLockError("Password must be at least 6 characters."); return; }
+    if(pass!==el("lockPass2").value){ showLockError("Passwords don't match."); return; }
     await createVault(pass); enterApp();
   } else {
     try{ await unlockVault(pass); enterApp(); }
-    catch(e){ showLockError("Kata sandi salah."); el("lockPass").select(); }
+    catch(e){ showLockError("Wrong password."); el("lockPass").select(); }
   }
 }
 function enterApp(){
   el("lockScreen").classList.add("hidden");
   el("app").classList.remove("hidden");
-  el("todayLabel").textContent=new Date().toLocaleDateString("id-ID",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+  el("todayLabel").textContent=new Date().toLocaleDateString("en-US",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
   processRecurring();
   render();
   cloudAutoPull();
@@ -878,6 +878,6 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape"&&el("scrim").classLi
 
 /* ---------------- boot ---------------- */
 if(!(window.crypto&&crypto.subtle)){
-  document.getElementById("lockDesc").textContent="Browser ini tidak mendukung enkripsi. Buka lewat https (GitHub Pages) atau localhost.";
+  document.getElementById("lockDesc").textContent="This browser doesn't support encryption. Open via https (GitHub Pages) or localhost.";
 }
 setupLockUI();
