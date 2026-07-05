@@ -191,7 +191,28 @@ function seed(){
     txns: [], adjust: 0, budgets: {}, recurring: []
   };
 }
-function normalizeState(){ S.budgets=S.budgets||{}; S.recurring=S.recurring||[]; }
+/* One-time migration: older vaults stored account types / category / income /
+   transfer labels in Indonesian. The app now stores and compares English
+   values (see TIPE/KATEGORI/JENIS_* above), so old data must be translated
+   in place or accounts silently stop matching isAsset()/isDebt(). */
+const MIGRATE_TIPE={"Rekening":"Bank Account","Investasi":"Investment","Kartu Kredit":"Credit Card"};
+const MIGRATE_KATEGORI={"Makanan & Minuman":"Food & Drinks","Transportasi":"Transportation","Belanja":"Shopping","Tagihan & Utilitas":"Bills & Utilities","Kesehatan":"Health","Hiburan":"Entertainment","Pendidikan":"Education","Tabungan & Investasi":"Savings & Investment","Cicilan / Pinjaman":"Installment / Loan","Donasi & Hadiah":"Donation & Gifts","Admin / Biaya":"Admin / Fees","Lainnya":"Other"};
+const MIGRATE_JENIS_MASUK={"Gaji":"Salary","Bonus / THR":"Bonus","Pendapatan Usaha":"Business Income","Hasil Investasi":"Investment Returns","Transfer Masuk":"Incoming Transfer","Lainnya":"Other"};
+const MIGRATE_JENIS_TRANSFER={"Pembayaran Kartu Kredit":"Credit Card Payment","Investasi":"Investment","Pencairan Investasi":"Investment Withdrawal","Transfer Antar Rekening":"Account Transfer"};
+function migrateLegacyData(){
+  S.accounts.forEach(a=>{ if(MIGRATE_TIPE[a.type]) a.type=MIGRATE_TIPE[a.type]; });
+  S.txns.forEach(t=>{
+    if(t.kind==="expense"&&MIGRATE_KATEGORI[t.cat]) t.cat=MIGRATE_KATEGORI[t.cat];
+    else if(t.kind==="income"&&MIGRATE_JENIS_MASUK[t.jenis]) t.jenis=MIGRATE_JENIS_MASUK[t.jenis];
+    else if(t.kind==="transfer"&&MIGRATE_JENIS_TRANSFER[t.jenis]) t.jenis=MIGRATE_JENIS_TRANSFER[t.jenis];
+  });
+  (S.recurring||[]).forEach(r=>{
+    if(r.kind==="expense"&&MIGRATE_KATEGORI[r.cat]) r.cat=MIGRATE_KATEGORI[r.cat];
+    else if(r.kind==="income"&&MIGRATE_JENIS_MASUK[r.jenis]) r.jenis=MIGRATE_JENIS_MASUK[r.jenis];
+  });
+  if(S.budgets) Object.keys(S.budgets).forEach(k=>{ if(MIGRATE_KATEGORI[k]){ S.budgets[MIGRATE_KATEGORI[k]]=S.budgets[k]; delete S.budgets[k]; } });
+}
+function normalizeState(){ S.budgets=S.budgets||{}; S.recurring=S.recurring||[]; migrateLegacyData(); }
 function uid(){ return "t"+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-3); }
 
 /* ---------------- state ---------------- */
