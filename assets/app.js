@@ -196,6 +196,7 @@ function uid(){ return "t"+Math.random().toString(36).slice(2,9)+Date.now().toSt
 
 /* ---------------- state ---------------- */
 let S=null, filter="all", txSearch="", txFrom="", txTo="";
+let recapPeriod="30", recapFrom="", recapTo="";
 async function persist(){ await writeVault(); render(); cloudPush(); }
 
 /* ---------------- compute ---------------- */
@@ -303,6 +304,50 @@ function render(){
   if(txFrom) list=list.filter(t=>t.date>=txFrom);
   if(txTo) list=list.filter(t=>t.date<=txTo);
   el("txList").innerHTML=list.length?list.map(txRow).join(""):emptyState();
+
+  renderRecap();
+}
+function recapRange(){
+  const today=new Date(), todayStr=today.toISOString().slice(0,10);
+  if(recapPeriod==="7"||recapPeriod==="30"){
+    const from=new Date(today); from.setDate(from.getDate()-(recapPeriod==="7"?6:29));
+    return [from.toISOString().slice(0,10), todayStr];
+  }
+  if(recapPeriod==="month") return [todayStr.slice(0,7)+"-01", todayStr];
+  if(recapPeriod==="lastmonth"){
+    const from=new Date(today.getFullYear(),today.getMonth()-1,1).toISOString().slice(0,10);
+    const to=new Date(today.getFullYear(),today.getMonth(),0).toISOString().slice(0,10);
+    return [from,to];
+  }
+  return [recapFrom||todayStr, recapTo||todayStr];
+}
+function renderRecap(){
+  const RC=[["7","7 Hari"],["30","30 Hari"],["month","Bulan Ini"],["lastmonth","Bulan Lalu"],["custom","Kustom"]];
+  el("recapFilters").innerHTML=RC.map(f=>`<button class="chip ${recapPeriod===f[0]?"active":""}" data-recapf="${f[0]}">${f[1]}</button>`).join("");
+  el("recapCustomWrap").classList.toggle("hidden",recapPeriod!=="custom");
+
+  const [from,to]=recapRange();
+  const days={};
+  S.txns.forEach(t=>{
+    if(t.date<from||t.date>to) return;
+    if(t.kind!=="expense"&&t.kind!=="income") return;
+    const d=days[t.date]||(days[t.date]={in:0,out:0});
+    if(t.kind==="expense") d.out+=t.amt; else d.in+=t.amt;
+  });
+  const dates=Object.keys(days).sort((a,b)=>a<b?1:-1);
+  let inSum=0,outSum=0; dates.forEach(d=>{inSum+=days[d].in; outSum+=days[d].out;});
+  el("recapIn").textContent=fmt(inSum); el("recapOut").textContent=fmt(outSum);
+  const net=inSum-outSum;
+  el("recapNet").textContent=(net>=0?"":"−")+fmt(Math.abs(net)).replace("Rp","Rp ");
+  el("recapNet").style.color=net>=0?"var(--green)":"var(--red)";
+  el("recapCount").textContent=dates.length;
+  el("recapList").innerHTML=dates.length?dates.map(d=>{
+    const x=days[d];
+    return `<div class="cat-row"><span class="c-name">${fmtDate(d)}</span><span style="flex:1"></span>
+      <span class="c-val num" style="color:var(--green)">+${fmt(x.in)}</span>
+      <span class="c-val num" style="color:var(--red)">−${fmt(x.out)}</span></div>`;
+  }).join("")
+    :`<div style="color:var(--muted);font-size:13px;padding:10px 0">Tidak ada transaksi di periode ini.</div>`;
 }
 function txRow(t){
   let ico,amtTxt,amtCol,meta;
@@ -735,6 +780,7 @@ document.addEventListener("click",e=>{
   const ea=e.target.closest("[data-editacc]"); if(ea){e.stopPropagation(); openAcc(ea.dataset.editacc); return;}
   const ee=e.target.closest("[data-edit]"); if(ee){ openTx(ee.dataset.edit); return;}
   const fl=e.target.closest("[data-filter]"); if(fl){ filter=fl.dataset.filter; render(); return;}
+  const rf=e.target.closest("[data-recapf]"); if(rf){ recapPeriod=rf.dataset.recapf; render(); return;}
   if(e.target.closest("#addAccBtn")) openAcc();
   if(e.target===el("scrim")) close();
 });
@@ -826,6 +872,8 @@ el("btnBudget").onclick=openBudgets;
 el("txSearch").oninput=()=>{txSearch=el("txSearch").value.trim(); render();};
 el("txFrom").onchange=()=>{txFrom=el("txFrom").value; render();};
 el("txTo").onchange=()=>{txTo=el("txTo").value; render();};
+el("recapFrom").onchange=()=>{recapFrom=el("recapFrom").value; render();};
+el("recapTo").onchange=()=>{recapTo=el("recapTo").value; render();};
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&el("scrim").classList.contains("show"))close();});
 
 /* ---------------- boot ---------------- */

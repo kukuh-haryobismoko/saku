@@ -77,6 +77,23 @@
     </div>
 
     <div class="sec">
+      <div class="sec-head"><h2>Rekap Harian</h2><span class="count" id="recapCount"></span></div>
+      <div class="tx-controls" id="recapFilters"></div>
+      <div class="tx-search hidden" id="recapCustomWrap">
+        <input type="date" id="recapFrom" title="Dari tanggal">
+        <input type="date" id="recapTo" title="Sampai tanggal">
+      </div>
+      <div class="panel">
+        <div class="flow" style="margin-top:0">
+          <div><div class="f-lab">Masuk</div><div class="f-val num" id="recapIn" style="color:var(--green)">Rp0</div></div>
+          <div><div class="f-lab">Keluar</div><div class="f-val num" id="recapOut" style="color:var(--red)">Rp0</div></div>
+          <div><div class="f-lab">Selisih</div><div class="f-val num" id="recapNet">Rp0</div></div>
+        </div>
+        <div id="recapList" style="margin-top:10px"></div>
+      </div>
+    </div>
+
+    <div class="sec">
       <div class="sec-head"><h2>Transaksi</h2><span class="count" id="txCount"></span></div>
       <div class="tx-controls" id="txFilters"></div>
       <div class="tx-search">
