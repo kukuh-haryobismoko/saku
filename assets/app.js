@@ -8,8 +8,10 @@ const SYNC_KEY  = "saku.sync.v1";              // sync config (local, not commit
 const SYNCDEF   = (CONFIG.sync) || {};          // non-secret defaults from config.js (owner/repo/path)
 let   PASSWORD  = null;                          // kept in session memory to derive the remote vault key
 let   SYNC      = null;                          // {owner,repo,path,branch,token}
-let   REMOTE_SHA= null;                          // last file sha on GitHub (for safe updates)
-let   syncBusy  = false, syncDirty = false;      // push queue control
+const BASE_KEY  = "saku.base.v1";              // {sha, wrap}: last vault this device & GitHub agreed on (merge base)
+let   syncBusy  = false, syncDirty = false;      // sync queue control
+let   authPrompted = false;                      // open the token form at most once per session
+let   lastSyncTry = 0, lastSyncOk = 0, lastSyncErr = "";
 
 /* ---------------- crypto (AES-GCM + PBKDF2) ---------------- */
 const enc = new TextEncoder(), dec = new TextDecoder();
@@ -61,7 +63,7 @@ async function changePassword(newPass){
   CRYPTOKEY = await deriveKey(newPass, SALT);
   PASSWORD = newPass;
   await writeVault();
-  cloudPush();
+  cloudSync();
 }
 
 /* ============================================================
@@ -78,86 +80,126 @@ function loadSync(){
   return SYNC;
 }
 function saveSync(cfg){ SYNC=cfg; localStorage.setItem(SYNC_KEY, JSON.stringify(cfg)); }
-function clearSync(){ SYNC=null; REMOTE_SHA=null; localStorage.removeItem(SYNC_KEY); loadSync(); }
+function clearSync(){ SYNC=null; localStorage.removeItem(SYNC_KEY); localStorage.removeItem(BASE_KEY); loadSync(); }
 function syncReady(){ return !!(SYNC&&SYNC.owner&&SYNC.repo&&SYNC.path&&SYNC.token); }
+function readBase(){ try{ return JSON.parse(localStorage.getItem(BASE_KEY)); }catch(e){ return null; } }
+// ponytail: base duplicates the vault in localStorage (~5 MB quota) → fine until the vault nears ~2 MB
+function setBase(sha, wrap){ localStorage.setItem(BASE_KEY, JSON.stringify({sha, wrap})); }
 
 function ghHeaders(){ return { "Authorization":"Bearer "+SYNC.token, "Accept":"application/vnd.github+json", "X-GitHub-Api-Version":"2022-11-28" }; }
-function ghUrl(){ return `https://api.github.com/repos/${SYNC.owner}/${SYNC.repo}/contents/${SYNC.path.split("/").map(encodeURIComponent).join("/")}`; }
+function ghApi(){ return `https://api.github.com/repos/${SYNC.owner}/${SYNC.repo}`; }
+function ghUrl(){ return ghApi()+`/contents/${SYNC.path.split("/").map(encodeURIComponent).join("/")}`; }
 const utf8b64  = s => b64(enc.encode(s));
 const b64utf8  = s => dec.decode(unb64(s.replace(/\n/g,"")));
 
 async function ghGet(){
-  const r = await fetch(ghUrl()+`?ref=${encodeURIComponent(SYNC.branch||"main")}`, {headers:ghHeaders()});
-  if(r.status===404){ REMOTE_SHA=null; return {wrap:null,sha:null}; }
+  // no-store: GitHub sends max-age=60, and a cached reply means stale data + a stale sha
+  const r = await fetch(ghUrl()+`?ref=${encodeURIComponent(SYNC.branch||"main")}`, {headers:ghHeaders(), cache:"no-store"});
+  if(r.status===404) return {wrap:null,sha:null};
   if(r.status===401||r.status===403) throw new Error("AUTH");
   if(!r.ok) throw new Error("HTTP "+r.status);
-  const j = await r.json(); REMOTE_SHA=j.sha;
+  const j = await r.json();
+  if(j.encoding==="none"){                      // file >1 MB: Contents API leaves content empty, the blob API doesn't (≤100 MB)
+    const b = await fetch(ghApi()+"/git/blobs/"+j.sha, {headers:ghHeaders()});
+    if(!b.ok) throw new Error("HTTP "+b.status);
+    j.content = (await b.json()).content;
+  }
   return { wrap: JSON.parse(b64utf8(j.content)), sha:j.sha };
 }
-async function ghPut(wrap){
+// Returns the new sha, or null if GitHub's copy moved since `sha` (caller re-pulls & merges)
+async function ghPut(wrap, sha){
   const body = { message:"saku sync "+new Date().toISOString(),
                  content: utf8b64(JSON.stringify(wrap)), branch: SYNC.branch||"main" };
-  if(REMOTE_SHA) body.sha=REMOTE_SHA;
-  let r = await fetch(ghUrl(), {method:"PUT", headers:{...ghHeaders(),"Content-Type":"application/json"}, body:JSON.stringify(body)});
-  if(r.status===409||r.status===422){           // stale sha → fetch the latest one and retry
-    await ghGet(); body.sha=REMOTE_SHA;
-    r = await fetch(ghUrl(), {method:"PUT", headers:{...ghHeaders(),"Content-Type":"application/json"}, body:JSON.stringify(body)});
-  }
+  if(sha) body.sha=sha;
+  const r = await fetch(ghUrl(), {method:"PUT", headers:{...ghHeaders(),"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  if(r.status===409||r.status===422) return null;
   if(r.status===401||r.status===403) throw new Error("AUTH");
   if(!r.ok) throw new Error("HTTP "+r.status);
-  const j = await r.json(); REMOTE_SHA = j.content && j.content.sha;
+  return (await r.json()).content.sha;
+}
+async function openWrap(w){                     // decrypt a vault wrap with the session password
+  const key = w.salt===b64(SALT) ? CRYPTOKEY : await deriveKey(PASSWORD, unb64(w.salt));
+  return { data: await decryptObj(key, w.blob), key };   // throws OperationError if the password differs
 }
 
-// Upload the local vault to GitHub (queue if already busy)
-function cloudPush(){
-  if(!syncReady()) return;
-  if(syncBusy){ syncDirty=true; return; }
-  syncBusy=true; setSyncDot("sync");
-  const wrap = readVault();
-  ghPut(wrap)
-    .then(()=>{ setSyncDot("ok"); })
-    .catch(e=>{ setSyncDot("err"); if(e.message==="AUTH") toast("GitHub token rejected — update it in Settings",true); else toast("Failed to sync to GitHub",true); })
-    .finally(()=>{ syncBusy=false; if(syncDirty){ syncDirty=false; cloudPush(); } });
-}
-
-// Pull the vault from GitHub. adopt=true → adopt it if the remote is newer (for other devices).
-async function cloudPull(adopt){
-  if(!syncReady()) return {status:"off"};
-  const {wrap} = await ghGet();
-  if(!wrap) return {status:"empty"};
-  const local = readVault();
-  const remoteNewer = !local || (wrap.updatedAt||0) > (local.updatedAt||0);
-  if(adopt && remoteNewer){
-    if(PASSWORD==null) throw new Error("LOCKED");
-    const salt = unb64(wrap.salt);
-    const key  = await deriveKey(PASSWORD, salt);
-    const data = await decryptObj(key, wrap.blob);   // throws if the password differs
-    S=data; normalizeState(); SALT=salt; CRYPTOKEY=key;
-    localStorage.setItem(VAULT_KEY, JSON.stringify(wrap));
-    return {status:"pulled"};
+/* 3-way merge against the last synced state: per item (lists, by id) or per
+   key (objects), keep this device's version if it changed since the last
+   sync, otherwise take GitHub's. Both changed → this device wins. Adds,
+   edits and deletes from both devices survive. */
+function mergeState(b, l, r){
+  const pick=(b,l,r)=>JSON.stringify(l)!==JSON.stringify(b) ? l : r;
+  const isObj=x=>x&&typeof x==="object"&&!Array.isArray(x);
+  const out={};
+  for(const k of new Set([...Object.keys(r),...Object.keys(l)])){
+    const bv=b?.[k], lv=l[k], rv=r[k];
+    let v;
+    if(Array.isArray(lv)&&Array.isArray(rv)){          // accounts / txns / recurring: per item, by id
+      const m=xs=>new Map((xs||[]).map(x=>[x.id,x])), B=m(bv), L=m(lv), R=m(rv);
+      v=[...new Set([...R.keys(),...L.keys()])].map(id=>pick(B.get(id),L.get(id),R.get(id))).filter(Boolean);
+    } else if(isObj(lv)&&isObj(rv)) v=mergeState(bv, lv, rv);   // budgets: per category
+    else v=pick(bv, lv, rv);
+    if(v!==undefined) out[k]=v;
   }
-  return {status: remoteNewer?"remote-newer":"up-to-date"};
+  return out;
 }
 
-// Auto-pull when entering the app
-async function cloudAutoPull(){
-  if(!syncReady()) return;
-  setSyncDot("sync");
+// Pull → merge → push. Safe to call anytime; calls while busy are queued.
+async function cloudSync(){
+  if(!syncReady()||!CRYPTOKEY) return;
+  if(!navigator.onLine){ setSyncDot("err"); return; }    // the "online" listener retries
+  if(syncBusy){ syncDirty=true; return; }
+  syncBusy=true; lastSyncTry=Date.now(); setSyncDot("sync");
   try{
-    const r = await cloudPull(true);
-    setSyncDot("ok");
-    if(r.status==="pulled"){ render(); toast("Latest data pulled from GitHub"); }
-    else if(r.status==="empty"){ cloudPush(); }   // repo still empty → upload local data
+    for(let tries=0;;tries++){
+      const {wrap, sha} = await ghGet();
+      const base = readBase();
+      let local = readVault();
+      if(wrap && sha!==base?.sha){                        // GitHub changed since our last sync
+        const R = await openWrap(wrap);
+        // no base yet (first sync on this device) → the older copy is the base = last-write-wins
+        const B = base ? (await openWrap(base.wrap)).data : ((wrap.updatedAt||0)>(local.updatedAt||0) ? S : R.data);
+        const M = mergeState(B, S, R.data);
+        if(JSON.stringify(M)===JSON.stringify(R.data)){   // nothing local to add → adopt GitHub's copy as-is
+          const changed = JSON.stringify(S)!==JSON.stringify(R.data);
+          S=R.data; normalizeState(); SALT=unb64(wrap.salt); CRYPTOKEY=R.key;
+          localStorage.setItem(VAULT_KEY, JSON.stringify(wrap)); setBase(sha, wrap);
+          if(changed){ render(); toast("Latest data pulled from GitHub"); }
+          break;
+        }
+        S=M; normalizeState(); local=await writeVault(); render();
+      } else if(base && local.updatedAt===base.wrap.updatedAt) break;   // nothing new on either side
+      const newSha = await ghPut(local, sha);
+      if(newSha){ setBase(newSha, local); break; }
+      if(tries>=2) throw new Error("CONFLICT");
+    }
+    lastSyncOk=Date.now(); lastSyncErr=""; setSyncDot("ok");
   }catch(e){
-    setSyncDot("err");
-    if(e.message==="AUTH") toast("GitHub token rejected — update it in Settings",true);
-    else if(e.message!=="LOCKED") toast("Failed to pull from GitHub",true);
+    setSyncDot("err"); lastSyncErr=e.message==="AUTH"?"token expired or rejected":e.name==="OperationError"?"different password on GitHub":"network/GitHub error";
+    if(e.message==="AUTH"){
+      toast("GitHub token expired or rejected — paste a new one",true);
+      if(!authPrompted&&!el("scrim").classList.contains("show")){ authPrompted=true; openSync(); }
+    }
+    else if(e.name==="OperationError") toast("GitHub data uses a different password",true);
+    else toast("Sync failed — will retry automatically",true);
+  }finally{
+    syncBusy=false; if(syncDirty){ syncDirty=false; cloudSync(); }
   }
 }
 function setSyncDot(state){
   const d=el("syncDot"); if(!d) return;
   d.className="sync-dot "+(state||"");
   d.title={sync:"Syncing…",ok:"Synced to GitHub",err:"Sync failed"}[state]||"";
+}
+// Tab/app comes back: catch up on date rollover, due recurring items and other devices' changes
+function resume(throttle){ if(!S) return; processRecurring(); render(); if(!throttle||Date.now()-lastSyncTry>10000) cloudSync(); }
+document.addEventListener("visibilitychange",()=>{ if(!document.hidden) resume(); });
+addEventListener("focus",()=>resume(true));   // desktop fires focus on every window switch → throttle
+addEventListener("online", cloudSync);
+function syncStatus(){
+  if(!syncReady()) return toast("Cloud Sync is off — set it up in Settings");
+  const t=lastSyncOk?new Date(lastSyncOk).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}):"";
+  toast(syncBusy?"Syncing…":lastSyncErr?"Sync failed: "+lastSyncErr+" — retrying":"Synced with GitHub "+t, !!lastSyncErr&&!syncBusy);
+  cloudSync();
 }
 loadSync();
 
@@ -218,7 +260,7 @@ function uid(){ return "t"+Math.random().toString(36).slice(2,9)+Date.now().toSt
 /* ---------------- state ---------------- */
 let S=null, filter="all", txSearch="", txFrom="", txTo="";
 let recapPeriod="30", recapFrom="", recapTo="", recapDate="";
-async function persist(){ await writeVault(); render(); cloudPush(); }
+async function persist(){ await writeVault(); render(); cloudSync(); }
 
 /* ---------------- WIB (GMT+7) date helpers ----------------
    "Today" must always mean the calendar day in Jakarta time, not
@@ -253,10 +295,14 @@ function calc(cutoff){
 const accById=id=>S.accounts.find(a=>a.id===id);
 const fmt=n=>new Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",maximumFractionDigits:0}).format(Math.round(n||0));
 const fmtShort=n=>{const v=Math.abs(n); if(v>=1e9)return (n/1e9).toFixed(1).replace(".0","")+"B"; if(v>=1e6)return (n/1e6).toFixed(1).replace(".0","")+"M"; if(v>=1e3)return Math.round(n/1e3)+"K"; return Math.round(n);};
+const fmtNum=n=>Number(n).toLocaleString("id-ID");
+// newest date first; within a day, the most recently added first (sort is stable)
+const byDateDesc=txns=>[...txns].reverse().sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0);
 const fmtDate=d=>new Date(d+"T00:00:00").toLocaleDateString("en-US",{day:"numeric",month:"short"});
 
 /* ---------------- render ---------------- */
 function render(){
+  el("todayLabel").textContent=new Date().toLocaleDateString("en-US",{weekday:"long",day:"numeric",month:"long",year:"numeric",timeZone:"Asia/Jakarta"});
   const c=calc();
   el("netWorth").textContent=fmt(c.net);
   el("heroMeta").innerHTML=`Total assets <b>${fmt(c.assets)}</b> &nbsp;·&nbsp; Debt <b>${fmt(c.debt)}</b>`;
@@ -328,12 +374,22 @@ function render(){
   el("txFilters").innerHTML=Fr.map(f=>`<button class="chip ${filter===f[0]?"active":""}" data-filter="${f[0]}">${f[1]}<span style="opacity:.6">${counts[f[0]]}</span></button>`).join("");
 
   el("txCount").textContent=S.txns.length;
-  let list=[...S.txns].sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0);
+  let list=byDateDesc(S.txns);
   if(filter!=="all") list=list.filter(t=>t.kind===filter);
-  if(txSearch) list=list.filter(t=>(t.desc||"").toLowerCase().includes(txSearch.toLowerCase()));
+  if(txSearch){
+    const q=txSearch.toLowerCase().replace(/^[\d.]+$/,m=>m.replace(/\./g,""));   // "15.000" also finds 15000
+    const hay=t=>[t.desc,t.cat,t.jenis,accById(t.acc)?.name,accById(t.from)?.name,accById(t.to)?.name,t.amt].join(" ").toLowerCase();
+    list=list.filter(t=>hay(t).includes(q));
+  }
   if(txFrom) list=list.filter(t=>t.date>=txFrom);
   if(txTo) list=list.filter(t=>t.date<=txTo);
   el("txList").innerHTML=list.length?list.map(txRow).join(""):emptyState();
+  const filtered=filter!=="all"||txSearch||txFrom||txTo;
+  el("txSum").classList.toggle("hidden",!filtered);
+  if(filtered){
+    const sum=k=>list.filter(t=>t.kind===k).reduce((s,t)=>s+t.amt,0);
+    el("txSum").innerHTML=`${list.length} shown · Out <b style="color:var(--red)">${fmt(sum("expense"))}</b> · In <b style="color:var(--green)">${fmt(sum("income"))}</b>`;
+  }
 
   renderRecap();
 }
@@ -374,7 +430,7 @@ function renderRecap(){
   el("recapNet").style.color=net>=0?"var(--green)":"var(--red)";
 
   if(recapPeriod==="date"){
-    const list=S.txns.filter(t=>t.date===from&&(t.kind==="expense"||t.kind==="income")).sort((a,b)=>a.date<b.date?1:-1);
+    const list=byDateDesc(S.txns).filter(t=>t.date===from&&(t.kind==="expense"||t.kind==="income"));
     el("recapCount").textContent=list.length;
     el("recapList").innerHTML=list.length?list.map(txRow).join(""):`<div style="color:var(--muted);font-size:13px;padding:10px 0">No transactions on this date.</div>`;
     return;
@@ -410,12 +466,13 @@ function openTx(editId){
   if(editing) txTab=editing.kind;
   const optAcc=(sel,types)=>S.accounts.filter(a=>!types||types.includes(a.type)).map(a=>`<option value="${a.id}" ${sel===a.id?"selected":""}>${esc(a.name)}</option>`).join("");
   const optList=(arr,sel)=>arr.map(o=>`<option ${o===sel?"selected":""}>${o}</option>`).join("");
-  const today=wibToday(), d=editing||{};
+  const today=wibToday();
   function body(){
+    const d=editing||lastUsed()[txTab]||{};
     const date=`<div class="field"><label>Date</label><input type="date" id="f_date" value="${d.date||today}"></div>`;
     const desc=`<div class="field"><label>Description</label><input id="f_desc" placeholder="e.g. Lunch" value="${editing?esc(d.desc||''):''}"></div>`;
-    const amt =`<div class="field amt"><label>Amount (Rp)</label><input id="f_amt" inputmode="numeric" placeholder="0" value="${editing?d.amt:''}"></div>`;
-    const extras=editing?"":`<div class="row2"><div class="field"><label>Admin/Fees (Rp, optional)</label><input id="f_admin" inputmode="numeric" placeholder="0"></div><div class="field"><label>Cashback (Rp, optional)</label><input id="f_cashback" inputmode="numeric" placeholder="0"></div></div><div class="field"><label>Cashback goes to</label><select id="f_cashback_acc">${optAcc(null,["Bank Account","Investment"])}</select></div>`;
+    const amt =`<div class="field amt"><label>Amount (Rp)</label><input id="f_amt" inputmode="numeric" data-money placeholder="0" value="${editing?fmtNum(d.amt):''}"></div>`;
+    const extras=editing?"":`<div class="row2"><div class="field"><label>Admin/Fees (Rp, optional)</label><input id="f_admin" inputmode="numeric" data-money placeholder="0"></div><div class="field"><label>Cashback (Rp, optional)</label><input id="f_cashback" inputmode="numeric" data-money placeholder="0"></div></div><div class="field"><label>Cashback goes to</label><select id="f_cashback_acc">${optAcc(null,["Bank Account","Investment"])}</select></div>`;
     if(txTab==="expense") return date+desc+`<div class="field"><label>Category</label><select id="f_cat">${optList(KATEGORI,d.cat)}</select></div>`+`<div class="field"><label>Account</label><select id="f_acc">${optAcc(d.acc)}</select></div>`+amt+`<div class="hint">Bank Account/Investment → balance decreases. Credit Card/Paylater → limit decreases & debt increases.</div>`+extras;
     if(txTab==="income") return date+desc+`<div class="field"><label>Type</label><select id="f_jenis">${optList(JENIS_MASUK,d.jenis)}</select></div>`+`<div class="field"><label>Goes to</label><select id="f_acc">${optAcc(d.acc,["Bank Account","Investment"])}</select></div>`+amt+`<div class="hint">For money coming in from outside (salary, transfer, investment returns).</div>`+extras;
     return date+desc+`<div class="field"><label>Type</label><select id="f_jenis">${optList(JENIS_TRANSFER,d.jenis)}</select></div>`+`<div class="row2"><div class="field"><label>From</label><select id="f_from">${optAcc(d.from)}</select></div><div class="field"><label>To</label><select id="f_to">${optAcc(d.to)}</select></div></div>`+amt+`<div class="hint" id="trHint">Money moves between accounts — net worth is unchanged.</div>`+extras;
@@ -427,7 +484,12 @@ function openTx(editId){
       <div class="save-row"><button class="btn btn-primary" id="saveTx" style="flex:1;justify-content:center">${editing?"Save Changes":"Save"}</button></div>
       ${editing?`<button class="del-link" id="delTx">${icoTrash} Delete transaction</button>`:""}
     </div>`);
-  if(!editing) qa("[data-tab]").forEach(b=>b.onclick=()=>{txTab=b.dataset.tab; qa("[data-tab]").forEach(x=>x.classList.toggle("active",x.dataset.tab===txTab)); el("txFormBody").innerHTML=body(); bindTrHint();});
+  if(!editing) qa("[data-tab]").forEach(b=>b.onclick=()=>{
+    txTab=b.dataset.tab; qa("[data-tab]").forEach(x=>x.classList.toggle("active",x.dataset.tab===txTab));
+    const keep=["f_date","f_desc","f_amt","f_admin","f_cashback"].map(id=>[id,el(id)?.value]);   // switching tab keeps what you typed
+    el("txFormBody").innerHTML=body(); bindTrHint();
+    keep.forEach(([id,v])=>{ if(el(id)&&v) el(id).value=v; });
+  });
   bindTrHint();
   el("saveTx").onclick=()=>{
     const amt=numIn("f_amt");
@@ -437,8 +499,9 @@ function openTx(editId){
     if(txTab==="expense") obj={kind:"expense",...base,cat:el("f_cat").value,acc:el("f_acc").value};
     else if(txTab==="income") obj={kind:"income",...base,jenis:el("f_jenis").value,acc:el("f_acc").value};
     else { const from=el("f_from").value,to=el("f_to").value; if(from===to){toast("'From' and 'To' accounts can't be the same",true);return;} obj={kind:"transfer",...base,jenis:el("f_jenis").value,from,to}; }
-    if(editing){ obj.id=editing.id; S.txns[S.txns.findIndex(t=>t.id===editing.id)]=obj; }
+    if(editing){ obj.id=editing.id; const i=S.txns.findIndex(t=>t.id===editing.id); if(i>=0) S.txns[i]=obj; else S.txns.push(obj); }   // S may have been replaced by a sync while the form was open
     else {
+      saveLastUsed(txTab,{acc:obj.acc,cat:obj.cat,jenis:obj.jenis,from:obj.from,to:obj.to});
       obj.id=uid(); S.txns.push(obj);
       const mainAcc=txTab==="transfer"?el("f_from").value:el("f_acc").value;
       const admin=numIn("f_admin");
@@ -465,7 +528,7 @@ function openAcc(editId){
     <div class="sheet-body">
       <div class="field"><label>Name</label><input id="a_name" placeholder="e.g. BCA Account" value="${editing?esc(d.name):''}"></div>
       <div class="field"><label>Type</label><select id="a_type">${TIPE.map(t=>`<option ${d.type===t?"selected":""}>${t}</option>`).join("")}</select></div>
-      <div class="field"><label id="a_baselab">Starting Balance / Limit (Rp)</label><input id="a_base" inputmode="numeric" placeholder="0" value="${d.base||""}"></div>
+      <div class="field"><label id="a_baselab">Starting Balance / Limit (Rp)</label><input id="a_base" inputmode="numeric" data-money placeholder="0" value="${d.base?fmtNum(d.base):""}"></div>
       <div class="field"><label>Logo initials</label><input id="a_mono" maxlength="4" placeholder="auto" value="${editing?esc(d.mono):''}" style="text-transform:uppercase"></div>
       <div class="field"><label>Color</label><div class="swatches" id="a_sw">${SWATCHES.map(c=>`<span class="sw ${c===d.color?"sel":""}" data-c="${c}" style="background:${c}"></span>`).join("")}</div></div>
       <div class="save-row"><button class="btn btn-primary" id="saveAcc" style="flex:1;justify-content:center">${editing?"Save":"Add"}</button></div>
@@ -480,8 +543,9 @@ function openAcc(editId){
     const type=el("a_type").value, base=numIn("a_base");
     let mono=el("a_mono").value.trim().toUpperCase();
     if(!mono) mono=name.replace(/[^A-Za-z ]/g,"").split(/\s+/).map(w=>w[0]||"").join("").slice(0,3).toUpperCase()||name.slice(0,3).toUpperCase();
-    if(editing) Object.assign(editing,{name,type,base,mono,color});
-    else S.accounts.push({id:"a"+uid(),name,type,base,mono,color});
+    const cur=editing&&accById(editing.id);   // look up again: a sync may have replaced S while the form was open
+    if(cur) Object.assign(cur,{name,type,base,mono,color});
+    else S.accounts.push({id:editing?editing.id:"a"+uid(),name,type,base,mono,color});
     persist(); close(); toast(editing?"Account updated":"Account added");
   };
   if(editing) el("delAcc").onclick=()=>{
@@ -505,7 +569,7 @@ function processRecurring(){
   let changed=false;
   S.recurring.forEach(r=>{
     while(r.nextDate<=today){
-      const id=uid();
+      const id="r"+r.id+r.nextDate;   // deterministic: two devices generating the same occurrence merge into one
       if(r.kind==="expense") S.txns.push({id,kind:"expense",date:r.nextDate,desc:r.desc,amt:r.amt,cat:r.cat,acc:r.acc});
       else S.txns.push({id,kind:"income",date:r.nextDate,desc:r.desc,amt:r.amt,jenis:r.jenis,acc:r.acc});
       r.nextDate=nextMonthDate(r.nextDate);
@@ -533,7 +597,7 @@ function openRecurringForm(){
     return `<div class="field"><label>Description</label><input id="r_desc" placeholder="e.g. Netflix"></div>`
       +(recurKind==="expense"?`<div class="field"><label>Category</label><select id="r_cat">${optList(KATEGORI)}</select></div>`+`<div class="field"><label>Account</label><select id="r_acc">${optAcc()}</select></div>`
         :`<div class="field"><label>Type</label><select id="r_cat">${optList(JENIS_MASUK)}</select></div>`+`<div class="field"><label>Goes to</label><select id="r_acc">${optAcc(["Bank Account","Investment"])}</select></div>`)
-      +`<div class="field"><label>Amount (Rp)</label><input id="r_amt" inputmode="numeric" placeholder="0"></div>`
+      +`<div class="field"><label>Amount (Rp)</label><input id="r_amt" inputmode="numeric" data-money placeholder="0"></div>`
       +`<div class="field"><label>Day of month</label><input id="r_day" type="number" min="1" max="28" value="1"></div>`;
   }
   sheet(`<div class="sheet-head"><h3>Add Recurring Transaction</h3>${closeBtn()}</div>
@@ -560,7 +624,7 @@ function openBudgets(){
   sheet(`<div class="sheet-head"><h3>Category Budgets</h3>${closeBtn()}</div>
     <div class="sheet-body">
       <div class="hint">Set a monthly limit per category (optional). Leave blank for no limit.</div>
-      ${KATEGORI.map(c=>`<div class="field"><label>${c}</label><input data-budget="${c}" inputmode="numeric" placeholder="0" value="${S.budgets[c]||""}"></div>`).join("")}
+      ${KATEGORI.map(c=>`<div class="field"><label>${c}</label><input data-budget="${c}" inputmode="numeric" data-money placeholder="0" value="${S.budgets[c]?fmtNum(S.budgets[c]):""}"></div>`).join("")}
       <div class="save-row"><button class="btn btn-primary" id="saveBudgets" style="flex:1;justify-content:center">Save</button></div>
     </div>`);
   el("saveBudgets").onclick=()=>{
@@ -621,11 +685,7 @@ function openSync(){
       <div class="field"><label>Fine-grained token (this repo only, Contents: Read &amp; Write)</label><input type="password" id="y_token" value="${esc(c.token||"")}" placeholder="github_pat_..."></div>
       <div class="hint">The token is <b>not</b> committed; it's kept only on this device. Create one at GitHub → Settings → Developer settings → Fine-grained tokens, scope it to the data repo, and grant <b>Contents: Read and write</b>.</div>
       <div class="save-row" style="margin-top:6px">
-        <button class="btn btn-primary" id="y_save" style="flex:1;justify-content:center">Save &amp; Test</button>
-      </div>
-      <div class="save-row">
-        <button class="btn btn-ghost" id="y_pull" style="flex:1;justify-content:center">${icoDownload} Pull now</button>
-        <button class="btn btn-ghost" id="y_push" style="flex:1;justify-content:center">${icoUpload} Push now</button>
+        <button class="btn btn-primary" id="y_save" style="flex:1;justify-content:center">Save &amp; connect</button>
       </div>
       ${on?`<div class="save-row"><button class="btn btn-ghost" id="y_off" style="flex:1;justify-content:center;color:var(--red)">Disconnect this device</button></div>`:""}
     </div>`);
@@ -634,29 +694,12 @@ function openSync(){
     path:(el("y_path").value.trim()||"vault.json"), branch:(el("y_branch").value.trim()||"main"),
     token:el("y_token").value.trim()
   });
-  el("y_save").onclick=async()=>{
+  el("y_save").onclick=()=>{
     const cfg=readForm();
     if(!cfg.owner||!cfg.repo||!cfg.token){ toast("Owner, repo, and token are required",true); return; }
-    saveSync(cfg); REMOTE_SHA=null;
-    try{
-      const {wrap}=await ghGet();                 // test the connection
-      if(!wrap){ cloudPush(); toast("Connected. Local data uploaded."); }
-      else { const r=await cloudPull(true); if(r.status!=="pulled") cloudPush(); toast(r.status==="pulled"?"Connected. Data pulled from GitHub.":"Connected & synced."); render(); }
-      setSyncDot("ok"); close();
-    }catch(e){
-      setSyncDot("err");
-      toast(e.message==="AUTH"?"Token/permission rejected by GitHub":(e.message==="LOCKED"?"Unlock first":"Failed to connect — check owner/repo/branch"),true);
-    }
-  };
-  el("y_pull").onclick=async()=>{
-    saveSync(readForm()); REMOTE_SHA=null;
-    try{ const r=await cloudPull(true); render(); toast(r.status==="pulled"?"Data pulled":r.status==="empty"?"Repo is still empty":"Already up to date"); setSyncDot("ok"); }
-    catch(e){ setSyncDot("err"); toast(e.message==="AUTH"?"Token rejected":"Failed to pull",true); }
-  };
-  el("y_push").onclick=async()=>{
-    saveSync(readForm()); REMOTE_SHA=null;
-    try{ await ghGet().catch(()=>{}); await ghPut(readVault()); toast("Data uploaded to GitHub"); setSyncDot("ok"); }
-    catch(e){ setSyncDot("err"); toast(e.message==="AUTH"?"Token rejected":"Failed to upload",true); }
+    // same target (e.g. just a new token) → keep the merge base so unsynced edits merge instead of overwrite
+    if(!SYNC||["owner","repo","path","branch"].some(k=>SYNC[k]!==cfg[k])) localStorage.removeItem(BASE_KEY);
+    saveSync(cfg); authPrompted=false; close(); cloudSync();
   };
   if(el("y_off")) el("y_off").onclick=()=>{ clearSync(); setSyncDot(""); close(); toast("Sync disconnected from this device"); };
 }
@@ -777,8 +820,21 @@ function confirmBox(title,msg,onYes){
     <button class="btn btn-primary" id="cYes" style="flex:1;justify-content:center;background:var(--red)">Delete</button></div></div>`);
   el("cNo").onclick=close; el("cYes").onclick=onYes;
 }
-function sheet(html){ el("sheet").innerHTML=html; el("scrim").classList.add("show"); document.body.style.overflow="hidden"; qa("[data-close]").forEach(b=>b.onclick=close); }
-function close(){ el("scrim").classList.remove("show"); document.body.style.overflow=""; }
+let sheetDirty=false, downOnScrim=false;
+function sheet(html){
+  const wasOpen=el("scrim").classList.contains("show");
+  el("sheet").innerHTML=html; el("scrim").classList.add("show"); document.body.classList.add("modal-open"); sheetDirty=false;
+  qa("[data-close]").forEach(b=>b.onclick=close);
+  if(!wasOpen||!history.state?.sheet) history.pushState({sheet:1},"");   // phone Back closes the sheet instead of leaving the app
+}
+function hideSheet(){ el("scrim").classList.remove("show"); document.body.classList.remove("modal-open"); }
+function close(){ hideSheet(); if(history.state?.sheet) history.back(); }
+// Backdrop tap / Esc never discard typed input — only × (or Back) does
+function softClose(){ if(sheetDirty) toast("Unsaved changes — tap × to discard",true); else close(); }
+addEventListener("popstate",()=>{ if(!history.state?.sheet) hideSheet(); });
+el("sheet").addEventListener("input",()=>{ sheetDirty=true; });
+// a drag that starts inside the sheet (e.g. selecting text) and ends on the backdrop is not a backdrop tap
+el("scrim").addEventListener("pointerdown",e=>{ downOnScrim=e.target===el("scrim"); });
 const closeBtn=()=>`<button class="icon-btn" data-close style="box-shadow:none;background:var(--bg)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button>`;
 
 /* ---------------- toast ---------------- */
@@ -808,6 +864,8 @@ const icoCloud=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strok
 /* ---------------- helpers ---------------- */
 function el(id){return document.getElementById(id);}
 function qa(s){return [...document.querySelectorAll(s)];}
+function lastUsed(){ try{ return JSON.parse(localStorage.getItem("saku.last.v1"))||{}; }catch(e){ return {}; } }
+function saveLastUsed(tab,v){ try{ localStorage.setItem("saku.last.v1", JSON.stringify({...lastUsed(),[tab]:v})); }catch(e){} }
 function numIn(id){return parseInt((el(id).value||"").replace(/\D/g,""),10)||0;}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 function tint(v){const map={"var(--green)":"#e3f1e7","var(--red)":"#fbe6e3","var(--gold)":"#f6ecd8","var(--teal)":"#e0efef"};return map[v]||"#eef3f4";}
@@ -821,7 +879,16 @@ document.addEventListener("click",e=>{
   const fl=e.target.closest("[data-filter]"); if(fl){ filter=fl.dataset.filter; render(); return;}
   const rf=e.target.closest("[data-recapf]"); if(rf){ recapPeriod=rf.dataset.recapf; render(); return;}
   if(e.target.closest("#addAccBtn")) openAcc();
-  if(e.target===el("scrim")) close();
+  if(e.target===el("scrim")&&downOnScrim) softClose();
+});
+// Money fields: live thousand separators ("15000000" → "15.000.000"), caret stays put
+document.addEventListener("input",e=>{
+  const i=e.target; if(!i.matches("[data-money]")) return;
+  const before=i.value.slice(0,i.selectionStart).replace(/\D/g,"").length;
+  const d=i.value.replace(/\D/g,"").replace(/^0+(?=\d)/,"");
+  i.value=d?fmtNum(d):"";
+  let pos=0; for(let n=0; pos<i.value.length&&n<before; pos++) if(/\d/.test(i.value[pos])) n++;
+  i.setSelectionRange(pos,pos);
 });
 
 /* ---------------- lock screen ---------------- */
@@ -859,15 +926,15 @@ function openCloudConnect(){
     const pass=el("cc_pass").value;
     if(!cfg.owner||!cfg.repo||!cfg.token){ toast("Owner, repo, and token are required",true); return; }
     if(!pass){ toast("Enter the password",true); return; }
-    saveSync(cfg); REMOTE_SHA=null; PASSWORD=pass;
+    saveSync(cfg); PASSWORD=pass;
     try{
-      const {wrap}=await ghGet();
+      const {wrap,sha}=await ghGet();
       if(!wrap){ toast("Repo is empty — no data on GitHub yet",true); return; }
       const salt=unb64(wrap.salt), key=await deriveKey(pass,salt);
       S=await decryptObj(key,wrap.blob);          // throws if the password is wrong
       normalizeState();
       SALT=salt; CRYPTOKEY=key;
-      localStorage.setItem(VAULT_KEY, JSON.stringify(wrap));
+      localStorage.setItem(VAULT_KEY, JSON.stringify(wrap)); setBase(sha, wrap);
       close(); enterApp(); setSyncDot("ok"); toast("Connected — data pulled from GitHub");
     }catch(e){
       PASSWORD=null;
@@ -892,10 +959,9 @@ async function tryUnlock(){
 function enterApp(){
   el("lockScreen").classList.add("hidden");
   el("app").classList.remove("hidden");
-  el("todayLabel").textContent=new Date().toLocaleDateString("en-US",{weekday:"long",day:"numeric",month:"long",year:"numeric",timeZone:"Asia/Jakarta"});
   processRecurring();
   render();
-  cloudAutoPull();
+  cloudSync();
 }
 function lockNow(){ CRYPTOKEY=null; PASSWORD=null; S=null; el("app").classList.add("hidden"); el("lockScreen").classList.remove("hidden"); setupLockUI(); }
 
@@ -914,7 +980,8 @@ el("txTo").onchange=()=>{txTo=el("txTo").value; render();};
 el("recapDate").onchange=()=>{recapDate=el("recapDate").value; render();};
 el("recapFrom").onchange=()=>{recapFrom=el("recapFrom").value; render();};
 el("recapTo").onchange=()=>{recapTo=el("recapTo").value; render();};
-document.addEventListener("keydown",e=>{if(e.key==="Escape"&&el("scrim").classList.contains("show"))close();});
+document.addEventListener("keydown",e=>{if(e.key==="Escape"&&el("scrim").classList.contains("show"))softClose();});
+el("syncStatus").onclick=syncStatus;
 
 /* ---------------- boot ---------------- */
 if(!(window.crypto&&crypto.subtle)){

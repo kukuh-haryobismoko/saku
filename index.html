@@ -4,11 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1B3A4B">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="assets/icon-192.png">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Saku">
 <title>Saku — Financial Tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/styles.css?v=2">
+<link rel="stylesheet" href="assets/styles.css?v=3">
 </head>
 <body>
 
@@ -36,7 +42,7 @@
         <div><div class="name">Saku</div><div class="sub" id="todayLabel"></div></div>
       </div>
       <div class="spacer"></div>
-      <span id="syncDot" class="sync-dot" title=""></span>
+      <button class="sync-btn" id="syncStatus" aria-label="Sync status"><span id="syncDot" class="sync-dot" title=""></span></button>
       <button class="icon-btn" id="btnLock" title="Lock">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg></button>
       <button class="icon-btn" id="btnSettings" title="Settings">
@@ -104,6 +110,7 @@
         <input type="date" id="txFrom" title="From date">
         <input type="date" id="txTo" title="To date">
       </div>
+      <div class="tx-sum hidden" id="txSum"></div>
       <div class="tx-list" id="txList"></div>
     </div>
   </div>
@@ -115,6 +122,6 @@
 <div class="toast" id="toast"></div>
 
 <script src="config.js"></script>
-<script src="assets/app.js?v=2"></script>
+<script src="assets/app.js?v=4"></script>
 </body>
 </html>

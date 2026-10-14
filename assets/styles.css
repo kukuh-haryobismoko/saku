@@ -128,6 +128,8 @@ button{font-family:inherit; cursor:pointer; border:none; background:none}
 .tx-search input{height:38px; border-radius:10px; border:1px solid var(--line); background:var(--surface); padding:0 12px; font-size:13px; font-family:inherit; color:var(--ink)}
 .tx-search input:focus{outline:none; border-color:var(--teal)}
 .tx-search input[type="search"]{flex:1; min-width:160px}
+.tx-sum{font-size:12.5px; color:var(--muted); margin:-4px 2px 10px}
+.tx-sum b{font-family:"Space Grotesk"; font-variant-numeric:tabular-nums}
 .tx-list{background:var(--surface); border-radius:var(--r); box-shadow:var(--shadow); overflow:hidden}
 .tx{display:flex; align-items:center; gap:13px; padding:13px 16px; border-bottom:1px solid var(--line); transition:.12s}
 .tx:last-child{border-bottom:none}
@@ -153,7 +155,8 @@ button{font-family:inherit; cursor:pointer; border:none; background:none}
 /* modal */
 .scrim{position:fixed; inset:0; background:rgba(20,38,46,.42); backdrop-filter:blur(3px); z-index:40; display:none; align-items:flex-end; justify-content:center}
 .scrim.show{display:flex}
-.sheet{background:var(--bg-2); width:100%; max-width:520px; border-radius:24px 24px 0 0; max-height:92vh; overflow:auto; box-shadow:var(--shadow-lg); animation:rise .26s cubic-bezier(.2,.7,.3,1)}
+body.modal-open{overflow:hidden; overscroll-behavior:none}   /* no pull-to-refresh (= reload + lock) while a sheet is open */
+.sheet{background:var(--bg-2); width:100%; max-width:520px; border-radius:24px 24px 0 0; max-height:92vh; max-height:92dvh; overflow:auto; overscroll-behavior:contain; box-shadow:var(--shadow-lg); animation:rise .26s cubic-bezier(.2,.7,.3,1)}
 @media(min-width:560px){.scrim{align-items:center} .sheet{border-radius:24px}}
 @keyframes rise{from{transform:translateY(24px); opacity:.6}to{transform:none; opacity:1}}
 .sheet-head{display:flex; align-items:center; gap:12px; padding:20px 22px 12px}
@@ -194,10 +197,13 @@ button{font-family:inherit; cursor:pointer; border:none; background:none}
   .fab{display:flex}
   .tx-date{display:none}
   .acc-actions{opacity:1}
+  .field input,.field select,.tx-search input{font-size:16px}   /* <16px makes iOS zoom in on focus */
 }
 
 /* ---- indikator status sinkronisasi cloud ---- */
-.sync-dot{width:10px;height:10px;border-radius:50%;background:transparent;margin-right:8px;flex:0 0 auto;transition:background .25s,box-shadow .25s}
+.sync-btn{width:32px;height:40px;display:grid;place-items:center;flex:0 0 auto;border-radius:10px}
+.sync-btn:hover{background:var(--bg-2)}
+.sync-dot{width:10px;height:10px;border-radius:50%;background:var(--line);transition:background .25s,box-shadow .25s}
 .sync-dot.ok{background:#1BA876;box-shadow:0 0 0 3px rgba(27,168,118,.18)}
 .sync-dot.err{background:#EE4D2D;box-shadow:0 0 0 3px rgba(238,77,45,.18)}
 .sync-dot.sync{background:#B7791F;box-shadow:0 0 0 3px rgba(183,121,31,.18);animation:syncpulse 1s ease-in-out infinite}

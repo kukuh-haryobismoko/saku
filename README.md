@@ -74,11 +74,13 @@ kata sandi Anda, isinya tak terbaca siapa pun — termasuk bila repo bocor. Toke
    tokens → Generate new token*.
    - *Repository access* → **Only select repositories** → pilih `saku-data`.
    - *Permissions → Repository → Contents* → **Read and write**.
+   - *Expiration* → **No expiration** (boleh untuk repo pribadi). Kalau memilih tanggal,
+     token akan mati di tanggal itu dan sync berhenti sampai token baru ditempel.
    - Salin tokennya (`github_pat_...`). Token ini hanya bisa menyentuh repo data itu.
 3. **(Opsional) isi default di `config.js`** agar tak perlu mengetik tiap perangkat —
    isi `owner` & `repo` (lihat blok `sync`). **Jangan** taruh token di sini.
 4. **Di aplikasi:** ⚙ → **Sinkronisasi Cloud (GitHub)** → isi owner, repo, nama file
-   (`vault.json`), branch (`main`), dan **tempel token** → **Simpan & Uji**.
+   (`vault.json`), branch (`main`), dan **tempel token** → **Save & connect**.
    Data lokal Anda langsung terunggah.
 
 ### Membuka di perangkat lain (HP, laptop kantor, dll)
@@ -87,10 +89,20 @@ kata sandi Anda, isinya tak terbaca siapa pun — termasuk bila repo bocor. Toke
 2. Di layar kunci, klik **“☁ Sudah punya data di GitHub? Sambungkan perangkat ini”**.
 3. Isi owner/repo/token **dan kata sandi yang sama** → **Tarik & Buka**. Selesai.
 
-Setelah tersambung, tiap perubahan otomatis terunggah, dan saat membuka aplikasi data
-terbaru otomatis ditarik. Titik kecil di kanan atas menunjukkan status sinkron
-(hijau = aman, oranye = sedang/ gagal). Bila dua perangkat mengubah bersamaan, yang
-**tersimpan paling akhir** menang — jadi selesaikan edit di satu perangkat dulu.
+Setelah tersambung, tiap perubahan otomatis terunggah, dan data terbaru ditarik saat
+aplikasi dibuka, saat tab/aplikasi kembali aktif, dan saat internet tersambung lagi.
+Titik kecil di kanan atas menunjukkan status sinkron (hijau = aman, oranye = sedang/
+gagal — akan dicoba ulang otomatis). Bila dua perangkat mengubah data bersamaan,
+perubahan keduanya **digabung** per transaksi (tambah, ubah, hapus); hanya bila
+transaksi yang *sama* diubah di dua perangkat, versi perangkat yang menyimpan terakhir
+yang dipakai.
+
+### Token kedaluwarsa / ditolak
+
+Data Anda tetap aman di perangkat (terenkripsi). Aplikasi akan membuka form Cloud Sync:
+buat token baru (langkah 2) → tempel → **Save & connect**. Perubahan yang dibuat
+selama token mati otomatis digabung, tidak menimpa data perangkat lain. Ulangi di
+setiap perangkat — token disimpan per perangkat.
 
 ---
 
