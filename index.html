@@ -4,6 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1B3A4B">
+<script>
+  /* theme before first paint: saved choice, else follow the device */
+  function applyTheme(){
+    var p; try{ p=localStorage.getItem("saku.theme"); }catch(e){}
+    var dark=p==="dark"||(p!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.dataset.theme=dark?"dark":"light";
+    document.querySelector('meta[name="theme-color"]').content=dark?"#0F1A1F":"#1B3A4B";
+  }
+  applyTheme(); matchMedia("(prefers-color-scheme: dark)").addEventListener("change",applyTheme);
+</script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="assets/icon-192.png">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
@@ -14,7 +24,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/styles.css?v=3">
+<link rel="stylesheet" href="assets/styles.css?v=4">
 </head>
 <body>
 
@@ -68,16 +78,24 @@
         <div class="acc-grid" id="accGrid"></div>
       </div>
       <div>
-        <div class="sec-head"><h2>This Month</h2></div>
+        <div class="sec-head"><h2>Monthly Report</h2></div>
         <div class="panel">
-          <h3>Spending by Category <button class="link-btn" id="btnBudget">Set budget</button></h3>
-          <div class="ph-sub" id="catSub"></div>
-          <div id="catList"></div>
+          <div class="legend"><span><i class="lg-in"></i>In</span><span><i class="lg-out"></i>Out</span><span class="legend-hint">Tap a month for details</span></div>
+          <div class="mchart" id="mChart"></div>
+          <details class="tbl"><summary>Show as table</summary><div id="mTable"></div></details>
+          <div class="month-nav">
+            <button class="icon-btn" id="mPrev" aria-label="Previous month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+            <h3 id="repMonth"></h3>
+            <button class="icon-btn" id="mNext" aria-label="Next month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
+          </div>
           <div class="flow">
             <div><div class="f-lab">In</div><div class="f-val num" id="flowIn" style="color:var(--green)">Rp0</div></div>
-            <div><div class="f-lab">Out</div><div class="f-val num" id="flowOut" style="color:var(--red)">Rp0</div></div>
+            <div><div class="f-lab">Out</div><div class="f-val num" id="flowOut" style="color:var(--red)">Rp0</div><div class="f-delta" id="flowDelta"></div></div>
             <div><div class="f-lab">Net</div><div class="f-val num" id="flowNet">Rp0</div></div>
           </div>
+          <h3 style="margin-top:18px">Spending by Category <button class="link-btn" id="btnBudget">Set budget</button></h3>
+          <div id="catList"></div>
+          <div id="topExp"></div>
         </div>
       </div>
     </div>
@@ -122,6 +140,6 @@
 <div class="toast" id="toast"></div>
 
 <script src="config.js"></script>
-<script src="assets/app.js?v=4"></script>
+<script src="assets/app.js?v=5"></script>
 </body>
 </html>

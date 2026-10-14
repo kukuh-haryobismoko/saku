@@ -8,7 +8,8 @@ const SYNC_KEY  = "saku.sync.v1";              // sync config (local, not commit
 const SYNCDEF   = (CONFIG.sync) || {};          // non-secret defaults from config.js (owner/repo/path)
 let   PASSWORD  = null;                          // kept in session memory to derive the remote vault key
 let   SYNC      = null;                          // {owner,repo,path,branch,token}
-const BASE_KEY  = "saku.base.v1";              // {sha, wrap}: last vault this device & GitHub agreed on (merge base)
+const BASE_KEY  = "saku.base.v1";
+const SESSION_KEY = "saku.session.v1";           // sessionStorage: survives refresh, gone when the tab/app is closed or 🔒 is pressed              // {sha, wrap}: last vault this device & GitHub agreed on (merge base)
 let   syncBusy  = false, syncDirty = false;      // sync queue control
 let   authPrompted = false;                      // open the token form at most once per session
 let   lastSyncTry = 0, lastSyncOk = 0, lastSyncErr = "";
@@ -21,7 +22,7 @@ async function deriveKey(password, salt){
   const base = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
     { name:"PBKDF2", salt, iterations:200000, hash:"SHA-256" },
-    base, { name:"AES-GCM", length:256 }, false, ["encrypt","decrypt"]);
+    base, { name:"AES-GCM", length:256 }, true, ["encrypt","decrypt"]);   // extractable: the session copy needs exportKey
 }
 async function encryptObj(key, obj){
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -40,7 +41,21 @@ async function writeVault(){
   const blob = await encryptObj(CRYPTOKEY, S);
   const wrap = { v:1, salt:b64(SALT), iter:200000, updatedAt:Date.now(), blob };
   localStorage.setItem(VAULT_KEY, JSON.stringify(wrap));
+  saveSession();
   return wrap;
+}
+// The derived key (never the password) is kept for this tab so a refresh doesn't lock you out
+async function saveSession(){
+  try{ sessionStorage.setItem(SESSION_KEY, JSON.stringify({salt:b64(SALT), k:b64(await crypto.subtle.exportKey("raw",CRYPTOKEY))})); }catch(e){}
+}
+async function restoreSession(){
+  try{
+    const s=JSON.parse(sessionStorage.getItem(SESSION_KEY)), v=readVault();
+    if(!s||!v||s.salt!==v.salt) return false;
+    const key=await crypto.subtle.importKey("raw", unb64(s.k), "AES-GCM", true, ["encrypt","decrypt"]);
+    S=await decryptObj(key, v.blob); normalizeState(); SALT=unb64(v.salt); CRYPTOKEY=key;
+    return true;
+  }catch(e){ return false; }
 }
 async function createVault(password){
   SALT = crypto.getRandomValues(new Uint8Array(16));
@@ -118,6 +133,7 @@ async function ghPut(wrap, sha){
   return (await r.json()).content.sha;
 }
 async function openWrap(w){                     // decrypt a vault wrap with the session password
+  if(w.salt!==b64(SALT)&&PASSWORD==null) throw new Error("NEEDPASS");   // restored session has the key, not the password
   const key = w.salt===b64(SALT) ? CRYPTOKEY : await deriveKey(PASSWORD, unb64(w.salt));
   return { data: await decryptObj(key, w.blob), key };   // throws OperationError if the password differs
 }
@@ -162,11 +178,12 @@ async function cloudSync(){
         if(JSON.stringify(M)===JSON.stringify(R.data)){   // nothing local to add → adopt GitHub's copy as-is
           const changed = JSON.stringify(S)!==JSON.stringify(R.data);
           S=R.data; normalizeState(); SALT=unb64(wrap.salt); CRYPTOKEY=R.key;
-          localStorage.setItem(VAULT_KEY, JSON.stringify(wrap)); setBase(sha, wrap);
+          localStorage.setItem(VAULT_KEY, JSON.stringify(wrap)); setBase(sha, wrap); saveSession();
           if(changed){ render(); toast("Latest data pulled from GitHub"); }
           break;
         }
-        S=M; normalizeState(); local=await writeVault(); render();
+        S=M; normalizeState(); SALT=unb64(wrap.salt); CRYPTOKEY=R.key;   // converge every device on GitHub's salt
+        local=await writeVault(); render();
       } else if(base && local.updatedAt===base.wrap.updatedAt) break;   // nothing new on either side
       const newSha = await ghPut(local, sha);
       if(newSha){ setBase(newSha, local); break; }
@@ -174,11 +191,12 @@ async function cloudSync(){
     }
     lastSyncOk=Date.now(); lastSyncErr=""; setSyncDot("ok");
   }catch(e){
-    setSyncDot("err"); lastSyncErr=e.message==="AUTH"?"token expired or rejected":e.name==="OperationError"?"different password on GitHub":"network/GitHub error";
+    setSyncDot("err"); lastSyncErr=e.message==="AUTH"?"token expired or rejected":e.message==="NEEDPASS"?"lock & unlock once to finish":e.name==="OperationError"?"different password on GitHub":"network/GitHub error";
     if(e.message==="AUTH"){
       toast("GitHub token expired or rejected — paste a new one",true);
       if(!authPrompted&&!el("scrim").classList.contains("show")){ authPrompted=true; openSync(); }
     }
+    else if(e.message==="NEEDPASS") toast("Lock & unlock once to finish syncing",true);
     else if(e.name==="OperationError") toast("GitHub data uses a different password",true);
     else toast("Sync failed — will retry automatically",true);
   }finally{
@@ -350,23 +368,7 @@ function render(){
       <div class="acc-foot">${foot}</div>${bar}</div>`;
   }).join("")+`<button class="add-acc" id="addAccBtn">${icoPlus}<span>Add Account</span></button>`;
 
-  const monthKey=wibToday().slice(0,7);
-  const mt=S.txns.filter(t=>t.date.slice(0,7)===monthKey);
-  const catTotals={}; let outSum=0,inSum=0;
-  mt.forEach(t=>{ if(t.kind==="expense"){catTotals[t.cat]=(catTotals[t.cat]||0)+t.amt; outSum+=t.amt;} if(t.kind==="income") inSum+=t.amt; });
-  const cats=Object.entries(catTotals).sort((a,b)=>b[1]-a[1]);
-  const maxCat=Math.max(1,...cats.map(c=>c[1]));
-  el("catSub").textContent=new Date(monthKey+"-01T00:00:00").toLocaleDateString("en-US",{month:"long",year:"numeric"});
-  el("catList").innerHTML=cats.length?cats.map(([n,v])=>{
-    const b=S.budgets[n];
-    const pct=Math.min(100,v/maxCat*100);
-    const barCol=b&&v>b?"var(--red)":undefined;
-    return `<div class="cat-row"><span class="c-name">${n}</span><span class="c-bar"><i style="width:${pct}%${barCol?";background:"+barCol:""}"></i></span><span class="c-val num">${fmt(v)}${b?`<span class="c-budget">/ ${fmt(b)}</span>`:""}</span></div>`;
-  }).join("")
-    :`<div style="color:var(--muted);font-size:13px;padding:10px 0">No expenses yet this month.</div>`;
-  el("flowIn").textContent=fmt(inSum); el("flowOut").textContent=fmt(outSum);
-  const net=inSum-outSum; el("flowNet").textContent=(net>=0?"":"−")+fmt(Math.abs(net)).replace("Rp","Rp ");
-  el("flowNet").style.color=net>=0?"var(--green)":"var(--red)";
+  renderMonthly();
 
   const counts={all:S.txns.length,expense:0,income:0,transfer:0};
   S.txns.forEach(t=>counts[t.kind]++);
@@ -392,6 +394,69 @@ function render(){
   }
 
   renderRecap();
+}
+/* ---------------- monthly report ---------------- */
+let repMonth=null;   // "YYYY-MM" shown in the report; null = current month
+const monthLabel=(k,month="long")=>new Date(k+"-01T00:00:00").toLocaleDateString("en-US",month==="long"?{month,year:"numeric"}:{month});
+const shiftMonth=(k,n)=>{ const [y,m]=k.split("-").map(Number); return new Date(Date.UTC(y,m-1+n,1)).toISOString().slice(0,7); };
+const niceStep=x=>{ const p=10**Math.floor(Math.log10(x)), f=x/p; return (f<=1?1:f<=2?2:f<=5?5:10)*p; };
+const signed=n=>(n>=0?"":"−")+fmt(Math.abs(n)).replace("Rp","Rp ");
+function renderMonthly(){
+  const cur=wibToday().slice(0,7), k=repMonth&&repMonth<cur?repMonth:cur, prevK=shiftMonth(k,-1);
+  const byMonth={};
+  S.txns.forEach(t=>{ if(t.kind==="transfer") return; const x=byMonth[t.date.slice(0,7)]??={in:0,out:0}; if(t.kind==="income") x.in+=t.amt; else x.out+=t.amt; });
+  const m=byMonth[k]||{in:0,out:0}, p=byMonth[prevK]||{in:0,out:0};
+  el("repMonth").textContent=monthLabel(k); el("mNext").disabled=k>=cur;
+  el("flowIn").textContent=fmt(m.in); el("flowOut").textContent=fmt(m.out);
+  el("flowNet").textContent=signed(m.in-m.out); el("flowNet").style.color=m.in>=m.out?"var(--green)":"var(--red)";
+  if(p.out){   // spending vs previous month: up is bad
+    const pct=Math.round((m.out-p.out)/p.out*100);
+    el("flowDelta").innerHTML=`<span style="color:${pct>0?"var(--red)":"var(--green)"}">${pct>0?"▲":pct<0?"▼":"="} ${Math.abs(pct)}%</span> vs ${monthLabel(prevK,"short")}`;
+  } else el("flowDelta").textContent="";
+
+  const catTotals={};
+  S.txns.forEach(t=>{ if(t.kind==="expense"&&t.date.slice(0,7)===k) catTotals[t.cat]=(catTotals[t.cat]||0)+t.amt; });
+  const cats=Object.entries(catTotals).sort((a,b)=>b[1]-a[1]);
+  const maxCat=Math.max(1,...cats.map(c=>c[1]));
+  el("catList").innerHTML=cats.length?cats.map(([n,v])=>{
+    const b=S.budgets[n], over=b&&v>b;
+    return `<div class="cat-row"><span class="c-name">${esc(n)}</span><span class="c-bar"><i style="width:${Math.min(100,v/maxCat*100)}%${over?";background:var(--red)":""}"></i></span><span class="c-val num">${fmt(v)}${b?`<span class="c-budget">/ ${fmt(b)}</span>`:""}</span></div>`;
+  }).join(""):`<div class="muted-note">No expenses in ${monthLabel(k)}.</div>`;
+  const top=S.txns.filter(t=>t.kind==="expense"&&t.date.slice(0,7)===k).sort((a,b)=>b.amt-a.amt).slice(0,3);
+  el("topExp").innerHTML=top.length?`<h3 style="margin:18px 0 6px">Biggest expenses</h3><div class="mini-list">${top.map(txRow).join("")}</div>`:"";
+  renderChart(byMonth,k,cur);
+}
+function renderChart(byMonth,sel,cur){
+  const data=[...Array(12)].map((_,i)=>{ const k=shiftMonth(cur,i-11); return {k,...(byMonth[k]||{in:0,out:0})}; });
+  const max=Math.max(...data.flatMap(d=>[d.in,d.out]));
+  el("mTable").innerHTML=`<table class="mt"><tr><th>Month</th><th>In</th><th>Out</th><th>Net</th></tr>${[...data].reverse().map(d=>`<tr><td>${monthLabel(d.k,"short")} ${d.k.slice(0,4)}</td><td class="num">${fmt(d.in)}</td><td class="num">${fmt(d.out)}</td><td class="num">${signed(d.in-d.out)}</td></tr>`).join("")}</table>`;
+  if(!max){ el("mChart").innerHTML=`<div class="muted-note">No income or expenses in the last 12 months.</div>`; return; }
+  const W=Math.max(260,el("mChart").clientWidth||400), H=170, pl=36, pb=20, pt=8;
+  const step=niceStep(max/3), top=Math.ceil(max/step)*step, y=v=>pt+(H-pt-pb)*(1-v/top);
+  const gw=(W-pl)/12, bw=Math.min(14,Math.max(3,(gw-8)/2)), narrow=gw<30;
+  // column: 4px rounded data end, square at the baseline
+  const col=(x,v,cls)=>{ if(v<=0) return ""; const yt=y(v), h=y(0)-yt, r=Math.min(4,h,bw/2);
+    return `<path class="${cls}" d="M${x},${y(0)}V${yt+r}Q${x},${yt} ${x+r},${yt}H${x+bw-r}Q${x+bw},${yt} ${x+bw},${yt+r}V${y(0)}Z"/>`; };
+  let svg=`<svg width="${W}" height="${H}" role="img" aria-label="Income and expenses per month, last 12 months">`;
+  data.forEach((d,i)=>{ if(d.k===sel) svg+=`<rect class="selband" x="${pl+gw*i+1}" y="0" width="${gw-2}" height="${H-pb+2}" rx="6"/>`; });
+  for(let v=0;v<=top;v+=step) svg+=`<line class="grid" x1="${pl}" x2="${W}" y1="${y(v)}" y2="${y(v)}"/><text class="ax" x="${pl-6}" y="${y(v)+3.5}" text-anchor="end">${v?fmtShort(v):0}</text>`;
+  data.forEach((d,i)=>{
+    const cx=pl+gw*i+gw/2;
+    svg+=col(cx-bw-1,d.in,"bar-in")+col(cx+1,d.out,"bar-out");   // 2px surface gap between the pair
+    svg+=`<text class="ax${d.k===sel?" sel":""}" x="${cx}" y="${H-5}" text-anchor="middle">${monthLabel(d.k,narrow?"narrow":"short")}</text>`;
+    svg+=`<rect class="hit" data-month="${d.k}" x="${pl+gw*i}" y="0" width="${gw}" height="${H}" tabindex="0" aria-label="${monthLabel(d.k)}: in ${fmt(d.in)}, out ${fmt(d.out)}"/>`;
+  });
+  el("mChart").innerHTML=svg+`</svg><div class="tip hidden" id="mTip"></div>`;
+  el("mChart").dataset.months=JSON.stringify(data);
+}
+function chartTip(hit){
+  const tip=el("mTip"); if(!tip) return;
+  if(!hit){ tip.classList.add("hidden"); return; }
+  const d=JSON.parse(el("mChart").dataset.months).find(x=>x.k===hit.dataset.month);
+  tip.innerHTML=`<div class="tip-h">${monthLabel(d.k)}</div><div class="tip-r"><i class="key-in"></i><b>${fmt(d.in)}</b> In</div><div class="tip-r"><i class="key-out"></i><b>${fmt(d.out)}</b> Out</div><div class="tip-r"><i></i><b>${signed(d.in-d.out)}</b> Net</div>`;
+  tip.classList.remove("hidden");
+  const box=el("mChart").getBoundingClientRect(), r=hit.getBoundingClientRect();
+  tip.style.left=Math.min(box.width-tip.offsetWidth, Math.max(0, r.left-box.left+r.width/2-tip.offsetWidth/2))+"px";
 }
 function recapRange(){
   const today=wibNow(), todayStr=ymd(today);
@@ -511,7 +576,7 @@ function openTx(editId){
     }
     persist(); close(); toast(editing?"Transaction updated":"Transaction saved");
   };
-  if(editing) el("delTx").onclick=()=>{ S.txns=S.txns.filter(t=>t.id!==editing.id); persist(); close(); toast("Transaction deleted"); };
+  if(editing) el("delTx").onclick=()=>{ close(); deleteTxns([editing.id],"Transaction deleted"); };
 }
 function bindTrHint(){
   const h=el("trHint"); if(!h) return;
@@ -550,9 +615,10 @@ function openAcc(editId){
   };
   if(editing) el("delAcc").onclick=()=>{
     const n=S.txns.filter(t=>t.acc===editing.id||t.from===editing.id||t.to===editing.id).length;
-    confirmBox(`Delete "${editing.name}"?`, n?`${n} related transactions will be deleted too.`:"This action cannot be undone.",()=>{
-      S.txns=S.txns.filter(t=>t.acc!==editing.id&&t.from!==editing.id&&t.to!==editing.id);
-      S.accounts=S.accounts.filter(a=>a.id!==editing.id); persist(); close(); toast("Account deleted");
+    confirmBox(`Delete "${editing.name}"?`, n?`${n} related transactions will be deleted too.`:"You can undo this for a few seconds.",()=>{
+      const id=editing.id, acc=accById(id)||editing, txns=S.txns.filter(t=>t.acc===id||t.from===id||t.to===id);
+      S.txns=S.txns.filter(t=>!txns.includes(t)); S.accounts=S.accounts.filter(a=>a.id!==id); persist(); close();
+      toast("Account deleted",false,{label:"Undo",fn:()=>{ S.accounts.push(acc); S.txns.push(...txns); persist(); toast("Account restored"); }});
     });
   };
 }
@@ -585,7 +651,11 @@ function openRecurringList(){
       <div id="recurList">${S.recurring.length?S.recurring.map(r=>`<div class="cat-row"><span class="c-name" style="width:auto;flex:1">${esc(r.desc)} <span style="color:var(--muted)">(day ${r.nextDate.slice(8)})</span></span><span class="c-val num">${fmt(r.amt)}</span><button class="mini-btn danger" data-delrecur="${r.id}" style="margin-left:8px">${icoTrash}</button></div>`).join(""):`<div style="color:var(--muted);font-size:13px;padding:10px 0">No recurring transactions yet.</div>`}</div>
       <div class="save-row"><button class="btn btn-primary" id="addRecur" style="flex:1;justify-content:center">${icoPlus} Add</button></div>
     </div>`);
-  qa("[data-delrecur]").forEach(b=>b.onclick=()=>{ S.recurring=S.recurring.filter(r=>r.id!==b.dataset.delrecur); persist(); openRecurringList(); });
+  qa("[data-delrecur]").forEach(b=>b.onclick=()=>{
+    const r=S.recurring.find(x=>x.id===b.dataset.delrecur);
+    S.recurring=S.recurring.filter(x=>x!==r); persist(); openRecurringList();
+    toast("Recurring transaction removed",false,{label:"Undo",fn:()=>{ S.recurring.push(r); persist(); if(el("recurList")) openRecurringList(); }});
+  });
   el("addRecur").onclick=openRecurringForm;
 }
 let recurKind="expense";
@@ -640,6 +710,7 @@ function openBudgets(){
 function openSettings(){
   sheet(`<div class="sheet-head"><h3>Settings</h3>${closeBtn()}</div>
     <div class="sheet-body">
+      <div class="field"><label>Theme</label><div class="tx-controls" style="margin:0">${["system","light","dark"].map(t=>`<button class="chip ${themePref()===t?"active":""}" data-theme-set="${t}">${t[0].toUpperCase()+t.slice(1)}</button>`).join("")}</div></div>
       <div class="field"><label>Manual Balance Adjustment (Rp)</label><input id="s_adj" inputmode="numeric" value="${S.adjust||0}"></div>
       <div class="hint">Corrects net worth. Set to <b>0</b> once all balances are recorded. Can be negative.</div>
       <div class="save-row"><button class="btn btn-primary" id="saveAdj" style="flex:1;justify-content:center">Save Adjustment</button></div>
@@ -661,6 +732,10 @@ function openSettings(){
       <input type="file" id="impFile" accept="application/json" class="hidden">
     </div>`);
   el("saveAdj").onclick=()=>{ S.adjust=parseInt((el("s_adj").value||"0").replace(/[^\d-]/g,""),10)||0; persist(); close(); toast("Adjustment saved"); };
+  qa("[data-theme-set]").forEach(b=>b.onclick=()=>{
+    try{ localStorage.setItem("saku.theme", b.dataset.themeSet); }catch(e){}
+    applyTheme(); qa("[data-theme-set]").forEach(x=>x.classList.toggle("active",x===b));
+  });
   el("expBtn").onclick=exportBackup;
   el("impBtn").onclick=()=>el("impFile").click();
   el("impFile").onchange=importBackup;
@@ -839,7 +914,17 @@ const closeBtn=()=>`<button class="icon-btn" data-close style="box-shadow:none;b
 
 /* ---------------- toast ---------------- */
 let toastT;
-function toast(msg,err){ const t=el("toast"); t.innerHTML=(err?icoWarn:icoCheck)+`<span>${esc(msg)}</span>`; t.classList.add("show"); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove("show"),2400); }
+function toast(msg,err,action){
+  const t=el("toast");
+  t.innerHTML=(err?icoWarn:icoCheck)+`<span>${esc(msg)}</span>`+(action?`<button class="toast-act">${esc(action.label)}</button>`:"");
+  if(action) t.querySelector(".toast-act").onclick=()=>{ t.classList.remove("show"); action.fn(); };
+  t.classList.add("show"); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove("show"),action?6000:2400);
+}
+function deleteTxns(ids,msg){
+  const gone=S.txns.filter(t=>ids.includes(t.id));
+  S.txns=S.txns.filter(t=>!ids.includes(t.id)); persist();
+  toast(msg,false,{label:"Undo",fn:()=>{ S.txns.push(...gone); persist(); toast("Transaction restored"); }});
+}
 
 /* ---------------- icons ---------------- */
 const icoPlus=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>`;
@@ -868,11 +953,13 @@ function lastUsed(){ try{ return JSON.parse(localStorage.getItem("saku.last.v1")
 function saveLastUsed(tab,v){ try{ localStorage.setItem("saku.last.v1", JSON.stringify({...lastUsed(),[tab]:v})); }catch(e){} }
 function numIn(id){return parseInt((el(id).value||"").replace(/\D/g,""),10)||0;}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
-function tint(v){const map={"var(--green)":"#e3f1e7","var(--red)":"#fbe6e3","var(--gold)":"#f6ecd8","var(--teal)":"#e0efef"};return map[v]||"#eef3f4";}
+function tint(v){return `color-mix(in srgb, ${v} 14%, transparent)`;}   // works in light & dark
+function themePref(){ try{ return localStorage.getItem("saku.theme")||"system"; }catch(e){ return "system"; } }
 
 /* ---------------- events ---------------- */
 document.addEventListener("click",e=>{
-  const ed=e.target.closest("[data-del]"); if(ed){e.stopPropagation(); const t=S.txns.find(x=>x.id===ed.dataset.del); confirmBox("Delete transaction?",esc(t&&t.desc||"")+" — "+fmt(t&&t.amt||0),()=>{S.txns=S.txns.filter(x=>x.id!==ed.dataset.del);persist();close();toast("Transaction deleted");}); return;}
+  const ed=e.target.closest("[data-del]"); if(ed){ e.stopPropagation(); deleteTxns([ed.dataset.del],"Transaction deleted"); return; }
+  const hm=e.target.closest(".hit[data-month]"); if(hm){ repMonth=hm.dataset.month; render(); return; }
   const da=e.target.closest("[data-delacc]"); if(da){e.stopPropagation(); openAcc(da.dataset.delacc); setTimeout(()=>{const b=el("delAcc"); if(b)b.click();},0); return;}
   const ea=e.target.closest("[data-editacc]"); if(ea){e.stopPropagation(); openAcc(ea.dataset.editacc); return;}
   const ee=e.target.closest("[data-edit]"); if(ee){ openTx(ee.dataset.edit); return;}
@@ -961,9 +1048,10 @@ function enterApp(){
   el("app").classList.remove("hidden");
   processRecurring();
   render();
+  saveSession();
   cloudSync();
 }
-function lockNow(){ CRYPTOKEY=null; PASSWORD=null; S=null; el("app").classList.add("hidden"); el("lockScreen").classList.remove("hidden"); setupLockUI(); }
+function lockNow(){ try{ sessionStorage.removeItem(SESSION_KEY); }catch(e){} CRYPTOKEY=null; PASSWORD=null; S=null; el("app").classList.add("hidden"); el("lockScreen").classList.remove("hidden"); setupLockUI(); }
 
 el("lockBtn").onclick=tryUnlock;
 el("lockPass").addEventListener("keydown",e=>{if(e.key==="Enter"){ if(readVault()) tryUnlock(); else el("lockPass2").focus(); }});
@@ -982,9 +1070,18 @@ el("recapFrom").onchange=()=>{recapFrom=el("recapFrom").value; render();};
 el("recapTo").onchange=()=>{recapTo=el("recapTo").value; render();};
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&el("scrim").classList.contains("show"))softClose();});
 el("syncStatus").onclick=syncStatus;
+el("mPrev").onclick=()=>{ repMonth=shiftMonth(repMonth||wibToday().slice(0,7),-1); render(); };
+el("mNext").onclick=()=>{ repMonth=shiftMonth(repMonth||wibToday().slice(0,7),1); render(); };
+el("mChart").addEventListener("pointermove",e=>chartTip(e.target.closest(".hit")));
+el("mChart").addEventListener("pointerleave",()=>chartTip(null));
+el("mChart").addEventListener("focusin",e=>chartTip(e.target.closest(".hit")));
+el("mChart").addEventListener("focusout",()=>chartTip(null));
+el("mChart").addEventListener("keydown",e=>{ const h=e.target.closest(".hit"); if(h&&(e.key==="Enter"||e.key===" ")){ e.preventDefault(); repMonth=h.dataset.month; render(); } });
+let resizeT; addEventListener("resize",()=>{ clearTimeout(resizeT); resizeT=setTimeout(()=>{ if(S) renderMonthly(); },150); });
 
 /* ---------------- boot ---------------- */
 if(!(window.crypto&&crypto.subtle)){
   document.getElementById("lockDesc").textContent="This browser doesn't support encryption. Open via https (GitHub Pages) or localhost.";
 }
 setupLockUI();
+restoreSession().then(ok=>{ if(ok) enterApp(); });

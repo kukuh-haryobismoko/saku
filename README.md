@@ -97,6 +97,27 @@ perubahan keduanya **digabung** per transaksi (tambah, ubah, hapus); hanya bila
 transaksi yang *sama* diubah di dua perangkat, versi perangkat yang menyimpan terakhir
 yang dipakai.
 
+### Kunci otomatis
+
+Refresh halaman **tidak** mengunci aplikasi. Aplikasi baru terkunci saat tab/aplikasi
+ditutup atau tombol 🔒 ditekan. Yang disimpan sementara hanya kunci enkripsi untuk tab
+itu (di `sessionStorage`), bukan kata sandi Anda.
+
+### Merapikan riwayat repo data (opsional, ±1,5 tahun lagi)
+
+Setiap sync menambah satu commit berisi salinan penuh data terenkripsi, jadi repo data
+terus membesar. GitHub menyarankan repo di bawah ±1 GB. Jika sudah mendekati itu,
+**unduh backup dulu** (⚙ → Download backup), lalu jalankan:
+
+```bash
+git clone https://github.com/<owner>/saku-data.git && cd saku-data
+git checkout --orphan fresh && git commit -m "Squash history"
+git push -f origin fresh:main
+```
+
+Isi `vault.json` tidak berubah, jadi semua perangkat tetap tersambung. Konsekuensinya:
+riwayat versi lama (cadangan otomatis) ikut terhapus.
+
 ### Token kedaluwarsa / ditolak
 
 Data Anda tetap aman di perangkat (terenkripsi). Aplikasi akan membuka form Cloud Sync:
