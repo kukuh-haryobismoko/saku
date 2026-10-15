@@ -16,7 +16,8 @@ let   lastSyncTry = 0, lastSyncOk = 0, lastSyncErr = "";
 
 /* ---------------- crypto (AES-GCM + PBKDF2) ---------------- */
 const enc = new TextEncoder(), dec = new TextDecoder();
-const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+// no fromCharCode(...bytes): spreading >~120k args throws RangeError, which broke sync once the vault grew past ~120 KB
+const b64 = buf => { let s=""; for(const c of new Uint8Array(buf)) s+=String.fromCharCode(c); return btoa(s); };
 const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 async function deriveKey(password, salt){
   const base = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
